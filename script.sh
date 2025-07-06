@@ -163,30 +163,61 @@ gpg_import() {
 # SSH
 ssh_setup() {
   echo ">>> SSH SETUP <<<"
+
+  # Crée ~/.ssh/config s'il n'existe pas
+  [[ -f "$HOME/.ssh/config" ]] || {
+    touch "$HOME/.ssh/config"
+    chmod 600 "$HOME/.ssh/config"
+  }
+
+  # Si aucun Host n'est défini, proposer la création d'un host de test
+  if ! grep -q '^Host ' "$HOME/.ssh/config"; then
+    read -p "Aucun host SSH trouvé. Créer un host de test ? [y/N] " ans
+    if [[ $ans =~ ^[Yy]$ ]]; then
+      TEST_KEY="$HOME/.ssh/id_rsa_test"
+      ssh-keygen -t rsa -b 2048 -f "$TEST_KEY" -N "" -C "clé de test partiel"
+      chmod 600 "$TEST_KEY"
+
+      cat >> "$HOME/.ssh/config" <<EOF
+
+Host test-host
+  HostName 192.168.1.50
+  User $(whoami)
+  IdentityFile $TEST_KEY
+EOF
+      echo "[OK] Host 'test-host' ajouté dans ~/.ssh/config"
+    fi
+  fi
+
+  # Lister tous les Host définis
+  echo "Hosts disponibles :"
+  grep '^Host ' "$HOME/.ssh/config" | awk '{print " -", $2}'
+
+  # Choix de l’host à importer
+  read -p "Host à importer : " CHOSEN
+
   TEMPLATE="$MOUNT_POINT/ssh_config"
   ALIAS_FILE="$MOUNT_POINT/.aliases"
-  echo "Host *" > "$TEMPLATE"
-  echo "  User $(whoami)" >> "$TEMPLATE"
-  echo "  IdentityFile ~/.ssh/id_rsa" >> "$TEMPLATE"
 
+  # Extrait la section choisie et la stocke dans le coffre
+  awk "/^Host $CHOSEN\$/,/^Host /" "$HOME/.ssh/config" > "$TEMPLATE"
+
+  # Copie la clé privée dans le coffre si présente
+  if grep -q "IdentityFile" "$TEMPLATE"; then
+    OLD_KEY=$(grep IdentityFile "$TEMPLATE" | awk '{print $2}')
+    NEW_KEY="$MOUNT_POINT/$(basename "$OLD_KEY")"
+    sed -i "s|$OLD_KEY|$NEW_KEY|" "$TEMPLATE"
+    cp "$OLD_KEY" "$NEW_KEY"
+    chmod 600 "$NEW_KEY"
+  fi
+
+  # Crée l’alias et le lien symbolique
   echo "alias evsh='ssh -F $TEMPLATE'" > "$ALIAS_FILE"
   ln -sf "$ALIAS_FILE" "$ALIAS_LINK"
 
-  if [[ -f "$HOME/.ssh/config" ]]; then
-    grep ^Host "$HOME/.ssh/config" | awk '{print " -", $2}'
-    read -p "Host à importer : " CHOSEN
-    awk "/^Host $CHOSEN\$/,/^Host /" "$HOME/.ssh/config" > "$TEMPLATE"
-
-    if grep -q "IdentityFile" "$TEMPLATE"; then
-      OLD_KEY=$(grep IdentityFile "$TEMPLATE" | awk '{print $2}')
-      NEW_KEY="$MOUNT_POINT/$(basename "$OLD_KEY")"
-      sed -i "s|$OLD_KEY|$NEW_KEY|" "$TEMPLATE"
-      cp "$OLD_KEY" "$NEW_KEY"
-      chmod 600 "$NEW_KEY"
-    fi
-    echo "[OK] SSH $CHOSEN importé dans le coffre"
-  fi
+  echo "[OK] SSH $CHOSEN importé dans le coffre et alias evsh prêt à l’emploi"
 }
+
 
 # Help
 usage() {
