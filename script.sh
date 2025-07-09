@@ -5,49 +5,52 @@
 set -euo pipefail
 export PATH="$PATH:/sbin:/usr/sbin"
 
-# Options
+# ------------------------------
+# Options & Couleurs
+# ------------------------------
+
 VERBOSE=0
 DRYRUN=0
 
-# Couleurs
-RED='\e[31m'
-GREEN='\e[32m'
-YELLOW='\e[33m'
-BLUE='\e[34m'
-NC='\e[0m'
+RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 
-# Helpers
-info()    { echo -e "${BLUE}$*${NC}"; }
+info()    { [[ $VERBOSE -eq 1 ]] && echo -e "${BLUE}$*${NC}"; }
 success() { echo -e "${GREEN}$*${NC}"; }
 warning() { echo -e "${YELLOW}$*${NC}"; }
 error()   { echo -e "${RED}$*${NC}" >&2; }
-prompt()  { echo -en "${BLUE}$*${NC}"; }
 
+# Wrapper pour exécuter ou simuler une commande
 run_cmd() {
   if [[ $DRYRUN -eq 1 ]]; then
     info "[DRY-RUN] $*"
   else
-    [[ $VERBOSE -eq 1 ]] && info "$*"
+    info "$*"
     "$@"
   fi
 }
 
+# Wrapper pour capturer la sortie d'une commande en mode dry-run ou normal
 run_cmd_output() {
   if [[ $DRYRUN -eq 1 ]]; then
     info "[DRY-RUN] $*"
-    return 0
+    echo ""
   else
-    [[ $VERBOSE -eq 1 ]] && info "$*"
+    info "$*"
     "$@"
   fi
 }
 
+# ------------------------------
+# Vérifications initiales
+# ------------------------------
 (( EUID == 0 )) || { error "exécuter en root"; exit 1; }
 for cmd in cryptsetup mkfs.ext4 mount umount fallocate dd losetup lsblk df blkid gpg; do
   command -v "$cmd" >/dev/null 2>&1 || { error "$cmd manquant"; exit 1; }
 done
 
-# Variables
+# ------------------------------
+# Variables clés
+# ------------------------------
 DEFAULT_SIZE="5G"
 CONTAINER="$HOME/env.img"
 LOOP_FILE="$HOME/env.loop"
@@ -55,16 +58,21 @@ MAPPING="env_sec"
 MOUNT_POINT="$HOME/env_mount"
 ALIAS_LINK="$HOME/.aliases_env"
 
-# Prépare les dossiers
+# Crée les répertoires si nécessaire
 mkdir -p "${CONTAINER%/*}" "$MOUNT_POINT"
 
-# Affichages
+# ------------------------------
+# Affichages d’état
+# ------------------------------
 show_lsblk() { echo; lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT; echo; }
 show_df()    { echo; df -Th | grep -E "$MAPPING|Filesystem"; echo; }
 show_blkid() { echo; blkid /dev/mapper/"$MAPPING" 2>/dev/null || echo "(pas de mapping ouvert)"; echo; }
 
+# ------------------------------
 # Utilitaires
+# ------------------------------
 read_size_and_pass() {
+  # Demande taille + mot de passe LUKS avec confirmation
   read -p "Taille du conteneur (ex: 5G, 500M) [${DEFAULT_SIZE}] : " SIZE
   SIZE=${SIZE:-$DEFAULT_SIZE}
   read -s -p "Mot de passe LUKS : " PASS; echo
@@ -73,11 +81,13 @@ read_size_and_pass() {
 }
 
 attach_loop() {
+  # Attache env.img à un loop device
   LOOPDEV=$(run_cmd_output losetup --find --show "$CONTAINER")
-  [[ $DRYRUN -eq 1 ]] || echo "$LOOPDEV" >"$LOOP_FILE"
+  [[ $DRYRUN -eq 0 ]] && echo "$LOOPDEV" >"$LOOP_FILE"
 }
 
 detach_loop() {
+  # Détache le loop device
   [[ -f "$LOOP_FILE" ]] && {
     run_cmd losetup -d "$(cat "$LOOP_FILE")"
     run_cmd rm -f "$LOOP_FILE"
@@ -85,109 +95,115 @@ detach_loop() {
 }
 
 unlock_volume() {
-  if [[ $DRYRUN -eq 1 ]]; then
-    info "[DRY-RUN] cryptsetup open --type luks1 $1 $MAPPING"
-  else
-    printf '%s' "$PASS" | cryptsetup open --type luks1 --key-file=- "$1" "$MAPPING"
-  fi
+  # Déverrouille le volume LUKS
+  printf '%s' "$PASS" | cryptsetup open --type luks1 --key-file=- "$1" "$MAPPING"
 }
 
 lock_volume() {
+  # Verrouille le volume LUKS
   run_cmd cryptsetup close "$MAPPING"
 }
 
 format_volume() {
+  # Formate en ext4
   run_cmd mkfs.ext4 /dev/mapper/"$MAPPING"
 }
 
 mount_volume() {
+  # Monte sur le point défini
   run_cmd mount /dev/mapper/"$MAPPING" "$MOUNT_POINT"
 }
 
 umount_volume() {
+  # Démontage silencieux
   run_cmd umount "$MOUNT_POINT" 2>/dev/null || :
 }
 
 set_permissions() {
+  # Sécurise les permissions
   run_cmd chmod 600 "$CONTAINER"
   run_cmd chmod -R go-rwx "$MOUNT_POINT"
 }
 
+# ------------------------------
 # Commandes principales
+# ------------------------------
 install() {
-  echo ">>> INSTALL <<<"
-  show_lsblk
+  echo ">>> install <<<"; show_lsblk
   read_size_and_pass
 
   [[ -f "$CONTAINER" ]] && { error "conteneur existe"; exit 1; }
   cryptsetup status "$MAPPING" &>/dev/null && { error "mapping existe"; exit 1; }
 
+  # Création du conteneur
   if ! run_cmd fallocate -l "$SIZE" "$CONTAINER" 2>/dev/null; then
     COUNT=${SIZE%[GgMm]}; [[ "$SIZE" =~ [Gg]$ ]] && COUNT=$((COUNT*1024))
     run_cmd dd if=/dev/zero of="$CONTAINER" bs=1M count="$COUNT" status=progress
   fi
+  show_lsblk
+
+  # Boucle + LUKS
   attach_loop; show_lsblk
-  if [[ $DRYRUN -eq 1 ]]; then
-    info "[DRY-RUN] cryptsetup luksFormat $LOOPDEV"
-  else
-    printf '%s' "$PASS" | cryptsetup luksFormat --type luks1 --batch-mode "$LOOPDEV" --key-file=-
-  fi
-  unlock_volume "$LOOPDEV"
-  format_volume
-  mount_volume
-  set_permissions
+  printf '%s' "$PASS" | \
+    cryptsetup luksFormat --type luks1 --batch-mode "$LOOPDEV" --key-file=-
+  show_lsblk
+
+  # Déverrouille, formate, monte
+  unlock_volume "$LOOPDEV"; show_lsblk
+  format_volume; show_lsblk
+  mount_volume; set_permissions
   show_lsblk; show_df; show_blkid
-  success "Environnement installé et monté sur $MOUNT_POINT"
+
+  success "environnement installé et monté sur $MOUNT_POINT"
 }
 
 open() {
-  echo ">>> OPEN <<<"
-  show_lsblk
+  echo ">>> open <<<"; show_lsblk
   [[ ! -f "$CONTAINER" ]] && { error "pas de conteneur"; exit 1; }
   [[ -f "$LOOP_FILE" ]] || attach_loop
 
   if [[ ! -e /dev/mapper/"$MAPPING" ]]; then
     read -s -p "Mot de passe LUKS : " PASS; echo
     unlock_volume "$(cat "$LOOP_FILE")"
-    success "Volume déverrouillé"
+    success "volume déverrouillé"
+  else
+    warning "mapping déjà ouvert"
   fi
-  mountpoint -q "$MOUNT_POINT" || mount_volume
-  set_permissions
+  show_lsblk
+
+  mountpoint -q "$MOUNT_POINT" || (mount_volume && set_permissions && success "monté sur $MOUNT_POINT")
   show_df
 }
 
 close() {
-  echo ">>> CLOSE <<<"
-  umount_volume && success "Démonté"
-  [[ -e /dev/mapper/"$MAPPING" ]] && (lock_volume && success "Verrouillé")
-  detach_loop && success "Loop détaché"
+  echo ">>> close <<<"; show_lsblk
+  umount_volume && success "démonté"
+  [[ -e /dev/mapper/"$MAPPING" ]] && lock_volume && success "verrouillé"
+  detach_loop && success "loop détaché"
   show_lsblk
 }
 
 delete() {
-  echo ">>> DELETE <<<"
+  echo ">>> delete <<<"
   close || :
-  rm -f "$CONTAINER" && success "Conteneur supprimé"
+  [[ -f "$CONTAINER" ]] && rm -f "$CONTAINER" && success "conteneur supprimé"
   rmdir "$MOUNT_POINT" 2>/dev/null || :
+  show_lsblk
 }
 
 status() {
-  echo ">>> STATUS <<<"
+  echo ">>> status <<<"
   run_cmd lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
-  run_cmd mount | grep "$MAPPING" || true
-  run_cmd blkid "/dev/mapper/$MAPPING" || true
-  run_cmd cryptsetup status "$MAPPING" || true
-  [[ -f "$ALIAS_LINK" ]] && success "Alias présent : $ALIAS_LINK" || warning "Alias absent : $ALIAS_LINK"
-  [[ -f "$MOUNT_POINT/ssh_config" ]] && success "Template SSH présent" || warning "Template SSH absent"
+  df -Th | grep "$MAPPING" || echo "(pas monté)"
+  blkid "/dev/mapper/$MAPPING" 2>/dev/null || echo "(pas de mapping)"
+  cryptsetup status "$MAPPING" 2>/dev/null || echo "(mapping fermé)"
 }
 
-# GPG
 gpg_setup() {
-  echo ">>> GPG SETUP <<<"
+  echo ">>> gpg-setup <<<"
   read -p "Nom : " NAME
   read -p "Email : " EMAIL
   read -p "Commentaire : " COMMENT
-
   cat >gpg-batch <<EOF
 %no-protection
 Key-Type: default
@@ -198,106 +214,79 @@ Name-Email: $EMAIL
 Expire-Date: 0
 %commit
 EOF
-
   run_cmd gpg --batch --generate-key gpg-batch
-  run_cmd rm -f gpg-batch
-  KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5}' | head -n1)
-  run_cmd gpg --export --armor "$KEYID" > "$MOUNT_POINT/public_$KEYID.gpg"
-  run_cmd gpg --export-secret-keys --armor "$KEYID" > "$MOUNT_POINT/private_$KEYID.gpg"
+  rm -f gpg-batch
+  KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')
+  run_cmd gpg --export --armor "$KEYID" >"$MOUNT_POINT/public_$KEYID.gpg"
+  run_cmd gpg --export-secret-keys --armor "$KEYID" >"$MOUNT_POINT/private_$KEYID.gpg"
   run_cmd chmod 600 "$MOUNT_POINT/private_$KEYID.gpg"
-  success "Clés exportées dans le coffre"
+  success "clés GPG exportées dans le coffre"
 }
 
 gpg_import() {
-  echo ">>> GPG IMPORT <<<"
-  shopt -s nullglob
-  files=("$MOUNT_POINT"/*.gpg)
-  shopt -u nullglob
-  [[ ${#files[@]} -eq 0 ]] && { warning "aucune clé à importer"; return 1; }
-  for f in "${files[@]}"; do
-    run_cmd gpg --import "$f" && success "Importé $f"
+  echo ">>> gpg-import <<<"
+  for f in "$MOUNT_POINT"/*.gpg; do
+    run_cmd gpg --import "$f" && success "importé $f"
   done
 }
 
 gpg_export() {
-  echo ">>> GPG EXPORT <<<"
-  KEYIDS=$(gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '/^sec/ {print $5}')
-  [[ -z "$KEYIDS" ]] && { warning "aucune clé à exporter"; return 1; }
-  for id in $KEYIDS; do
-    run_cmd gpg --export --armor "$id" > "$MOUNT_POINT/public_${id}.gpg"
-    run_cmd gpg --export-secret-keys --armor "$id" > "$MOUNT_POINT/private_${id}.gpg"
+  echo ">>> gpg-export <<<"
+  for id in $(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5}'); do
+    run_cmd gpg --export --armor "$id" >"$MOUNT_POINT/public_${id}.gpg"
+    run_cmd gpg --export-secret-keys --armor "$id" >"$MOUNT_POINT/private_${id}.gpg"
     run_cmd chmod 600 "$MOUNT_POINT/private_${id}.gpg"
-    success "Clés $id exportées dans le coffre"
+    success "clés $id exportées"
   done
 }
 
-# SSH
 ssh_setup() {
-  echo ">>> SSH SETUP <<<"
-
-  # Crée ~/.ssh/config s'il n'existe pas
-  [[ -f "$HOME/.ssh/config" ]] || {
-    run_cmd touch "$HOME/.ssh/config"
-    run_cmd chmod 600 "$HOME/.ssh/config"
-  }
-
-  # Si aucun Host n'est défini, proposer la création d'un host de test
+  echo ">>> ssh-setup <<<"
+  [[ ! -f "$HOME/.ssh/config" ]] && run_cmd touch "$HOME/.ssh/config" && run_cmd chmod 600 "$HOME/.ssh/config"
   if ! grep -q '^Host ' "$HOME/.ssh/config"; then
-    read -p "Aucun host SSH trouvé. Créer un host de test ? [y/N] " ans
-    if [[ $ans =~ ^[Yy]$ ]]; then
-      TEST_KEY="$HOME/.ssh/id_rsa_test"
-      run_cmd ssh-keygen -t rsa -b 2048 -f "$TEST_KEY" -N "" -C "clé de test partiel"
-      run_cmd chmod 600 "$TEST_KEY"
-
-      cat >> "$HOME/.ssh/config" <<EOF
+    read -p "Créer un host test SSH ? [y/N] " ANS
+    [[ $ANS =~ ^[Yy]$ ]] && {
+      run_cmd ssh-keygen -t rsa -b 2048 -f "$HOME/.ssh/id_rsa_test" -N "" -C "test-host"
+      cat >>"$HOME/.ssh/config" <<EOF
 
 Host test-host
   HostName 192.168.1.50
   User $(whoami)
-  IdentityFile $TEST_KEY
+  IdentityFile $HOME/.ssh/id_rsa_test
 EOF
-      success "Host 'test-host' ajouté dans ~/.ssh/config"
-    fi
+      success "host 'test-host' ajouté"
+    }
   fi
-
-  # Lister tous les Host définis
-  echo "Hosts disponibles :"
   grep '^Host ' "$HOME/.ssh/config" | awk '{print " -", $2}'
-
-  # Choix de l’host à importer
   read -p "Host à importer : " CHOSEN
-
   TEMPLATE="$MOUNT_POINT/ssh_config"
-  ALIAS_FILE="$MOUNT_POINT/.aliases"
-
-  # Extrait la section choisie et la stocke dans le coffre
-  awk "/^Host $CHOSEN\$/,/^Host /" "$HOME/.ssh/config" > "$TEMPLATE"
-
-  # Copie la clé privée dans le coffre si présente
-  if grep -q "IdentityFile" "$TEMPLATE"; then
-    OLD_KEY=$(grep IdentityFile "$TEMPLATE" | awk '{print $2}')
-    NEW_KEY="$MOUNT_POINT/$(basename "$OLD_KEY")"
-    run_cmd sed -i "s|$OLD_KEY|$NEW_KEY|" "$TEMPLATE"
-    run_cmd cp "$OLD_KEY" "$NEW_KEY"
-    run_cmd chmod 600 "$NEW_KEY"
-  fi
-
-  # Crée l’alias et le lien symbolique
-  echo "alias evsh='ssh -F $TEMPLATE'" > "$ALIAS_FILE"
-  run_cmd ln -sf "$ALIAS_FILE" "$ALIAS_LINK"
-
-  success "SSH $CHOSEN importé dans le coffre et alias evsh prêt à l’emploi"
+  awk "/^Host $CHOSEN\$/,/^Host /" "$HOME/.ssh/config" >"$TEMPLATE"
+  [[ -f "$TEMPLATE" ]] && success "SSH config exportée vers $TEMPLATE"
+  echo "alias evsh='ssh -F $TEMPLATE'" >"$ALIAS_LINK"
+  ln -sf "$ALIAS_LINK" "$HOME/.aliases_env"
+  success "alias 'evsh' prêt"
 }
 
-
+# ------------------------------
+# Aide & parsing
+# ------------------------------
 usage() {
   cat <<EOF
 Usage: $0 [-v] [-n] <commande>
-Commandes: install, open, close, delete, gpg-setup, gpg-import, gpg-export, ssh-setup, status
-Options:
-  -v           mode verbeux
-  -n           dry-run
-  -h, --help   afficher cette aide
+Commandes :
+  install    créer et monter l'environnement
+  open       déverrouiller et monter
+  close      démonter et verrouiller
+  delete     supprimer conteneur + loop
+  status     afficher état (lsblk, df, blkid)
+  gpg-setup  générer clés GPG dans le coffre
+  gpg-import importer toutes les .gpg du coffre
+  gpg-export exporter toutes vos clés dans le coffre
+  ssh-setup  importer un host SSH et générer alias evsh
+Options :
+  -v         verbeux
+  -n         dry-run
+  -h, --help afficher cette aide
 EOF
 }
 
@@ -314,22 +303,22 @@ parse_args() {
       *) usage; exit 1 ;;
     esac
   done
-  COMMAND="${1:-}"
-  [[ -z "$COMMAND" ]] && { usage; exit 1; }
+  COMMAND="${1:-}"; [[ -z "$COMMAND" ]] && usage
 }
 
 parse_args "$@"
 [[ $VERBOSE -eq 1 ]] && set -x
 
+# Exécution
 case "$COMMAND" in
   install)     install ;;
   open)        open ;;
   close)       close ;;
   delete)      delete ;;
+  status)      status ;;
   gpg-setup)   gpg_setup ;;
   gpg-import)  gpg_import ;;
   gpg-export)  gpg_export ;;
   ssh-setup)   ssh_setup ;;
-  status)      status ;;
   *)           usage ;;
 esac
