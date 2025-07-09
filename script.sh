@@ -155,8 +155,24 @@ EOF
 
 gpg_import() {
   echo ">>> GPG IMPORT <<<"
-  for f in "$MOUNT_POINT"/*.gpg; do
+  shopt -s nullglob
+  files=("$MOUNT_POINT"/*.gpg)
+  shopt -u nullglob
+  [[ ${#files[@]} -eq 0 ]] && { echo "[Erreur] aucune clé à importer"; return 1; }
+  for f in "${files[@]}"; do
     gpg --import "$f" && echo "[OK] Importé $f"
+  done
+}
+
+gpg_export() {
+  echo ">>> GPG EXPORT <<<"
+  KEYIDS=$(gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '/^sec/ {print $5}')
+  [[ -z "$KEYIDS" ]] && { echo "[Erreur] aucune clé à exporter"; return 1; }
+  for id in $KEYIDS; do
+    gpg --export --armor "$id" > "$MOUNT_POINT/public_${id}.gpg"
+    gpg --export-secret-keys --armor "$id" > "$MOUNT_POINT/private_${id}.gpg"
+    chmod 600 "$MOUNT_POINT/private_${id}.gpg"
+    echo "[OK] Clés $id exportées dans le coffre"
   done
 }
 
@@ -185,17 +201,7 @@ Host test-host
   User $(whoami)
   IdentityFile $TEST_KEY
 EOF
-      echo "[OK] Host 'test-host' ajouté dans ~/.ssh/config"
-    fi
-  fi
-
-  # Lister tous les Host définis
-  echo "Hosts disponibles :"
-  grep '^Host ' "$HOME/.ssh/config" | awk '{print " -", $2}'
-
-  # Choix de l’host à importer
-  read -p "Host à importer : " CHOSEN
-
+@@ -199,41 +215,42 @@ EOF
   TEMPLATE="$MOUNT_POINT/ssh_config"
   ALIAS_FILE="$MOUNT_POINT/.aliases"
 
@@ -221,7 +227,7 @@ EOF
 
 # Help
 usage() {
-  echo "Usage: $0 {install|open|close|delete|gpg-setup|gpg-import|ssh-setup}"
+  echo "Usage: $0 {install|open|close|delete|gpg-setup|gpg-import|gpg-export|ssh-setup}"
   exit 1
 }
 
@@ -234,6 +240,7 @@ case "$1" in
   delete)      delete ;;
   gpg-setup)   gpg_setup ;;
   gpg-import)  gpg_import ;;
+  gpg-export)  gpg_export ;;
   ssh-setup)   ssh_setup ;;
   *)           usage ;;
 esac
