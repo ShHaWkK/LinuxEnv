@@ -1,6 +1,5 @@
 #!/bin/bash
 # Secure Environment toolbox
-
 set -euo pipefail
 export PATH="$PATH:/sbin:/usr/sbin"
 
@@ -26,7 +25,7 @@ SSH_DIR="$MOUNT/ssh"
 GPG_DIR="$MOUNT/gpg"
 SSH_BACKUP_DIR="$BACKUP/ssh_wallets"
 ALIAS_LINK="$HOME/.aliases_env"
-LOG="/tmp/env2.log"
+LOG="/tmp/secure_env.log"
 : >"$LOG"
 
 if [[ -n "${SUDO_USER-}" && "$SUDO_USER" != "root" ]]; then
@@ -70,6 +69,12 @@ check_mounted(){
   }
 }
 
+ensure_env_open(){
+  if ! mountpoint -q "$MOUNT"; then
+    open_env || return 1
+  fi
+}
+
 # ─── Partie I & IV : Environnement LUKS/ext4 ─────────────────────────────────
 ask_pass(){
   read -p "Taille conteneur (ex:5G,500M) [${DEFAULT_SIZE}] : " SIZE
@@ -94,7 +99,9 @@ install_env(){
   fi
 
   local cnt=${SIZE%[GgMm]}; [[ "$SIZE" =~ [Gg]$ ]] && cnt=$((cnt*1024))
-  if command -v pv &>/dev/null; then
+  if command -v fallocate &>/dev/null; then
+    fallocate -l "$SIZE" "$CONTAINER"
+  elif command -v pv &>/dev/null; then
     dd if=/dev/zero bs=1M count="$cnt" status=none \
       | pv -s $((cnt*1024*1024)) >"$CONTAINER"
   else
@@ -115,7 +122,7 @@ install_env(){
   mkfs.ext4 "/dev/mapper/$MAPPER" & spinner $!
   log "[OK] ext4 formaté"
 
-  mount "/dev/mapper/$MAPPER" "$MOUNT"
+  mountpoint -q "$MOUNT" || mount "/dev/mapper/$MAPPER" "$MOUNT"
   chmod -R go-rwx "$MOUNT"
   mkdir -p "$SSH_DIR" "$GPG_DIR"
   log "[OK] Monté sur $MOUNT"
@@ -133,7 +140,7 @@ open_env(){
       | cryptsetup open "$CONTAINER" "$MAPPER" --key-file=-
     log "[OK] LUKS ouvert"
   fi
-  mount "/dev/mapper/$MAPPER" "$MOUNT"
+  mountpoint -q "$MOUNT" || mount "/dev/mapper/$MAPPER" "$MOUNT"
   mkdir -p "$SSH_DIR" "$GPG_DIR"
   log "[OK] Monté sur $MOUNT"
   show_summary
@@ -141,14 +148,14 @@ open_env(){
 
 close_env(){
   log "== CLOSE ENV =="
-  umount "$MOUNT" &>/dev/null && log "[OK] Démonté"
+  mountpoint -q "$MOUNT" && umount "$MOUNT" && log "[OK] Démonté"
   cryptsetup close "$MAPPER" && log "[OK] LUKS fermé"
   show_summary
 }
 
 delete_env(){
   log "== DELETE ENV =="
-  umount "$MOUNT" &>/dev/null||:
+  mountpoint -q "$MOUNT" && umount "$MOUNT"
   cryptsetup close "$MAPPER" &>/dev/null||:
   rm -f "$CONTAINER" && log "[OK] Conteneur supprimé"
   rmdir "$MOUNT" 2>/dev/null||:
@@ -176,7 +183,7 @@ status_env(){
 # ─── Partie II : GPG automatisé ─────────────────────────────────────────────
 gpg_setup(){
   log "== GPG SETUP =="
-  check_mounted || return
+  ensure_env_open || return
   mkdir -p "$GPG_DIR"
   read -p "Nom        : " N
   read -p "Email      : " E
@@ -207,10 +214,12 @@ EOF
 
 gpg_import(){
   log "== GPG IMPORT =="
-  check_mounted || return
+  ensure_env_open || return
+  shopt -s nullglob
   for f in "$GPG_DIR"/*.gpg; do
     gpg --import "$f" && log "[OK] Import $f"
   done
+  shopt -u nullglob
   show_summary
 }
 
@@ -229,9 +238,10 @@ ssh_create_template(){
     log "[ER] Pas de host"
     return
   }
+  tags=(); for h in "${hosts[@]}"; do tags+=( "$h" "" ); done
   CH=$(whiptail --title "ssh-create-template" \
-    --menu "Choisissez un host" 15 60 6 \
-    "$(printf "%s\n" "${hosts[@]/#//}")" \
+    --menu "Choisissez un host" 15 60 ${#hosts[@]} \
+    "${tags[@]}" \
     3>&1 1>&2 2>&3) || return
   awk "/^Host $CH\$/,/^Host /" "$SSH_CONFIG" \
     >"$SSH_DIR/sshconf_$CH"
@@ -295,9 +305,10 @@ restore_ssh_wallet(){
     log "[ER] Pas de SSH backup"
     return
   }
+  tags=(); for b in "${bs[@]}"; do tags+=( "$(basename "$b")" "" ); done
   CH=$(whiptail --title "restore-ssh-wallet" \
     --menu "Choisissez backup" 15 60 ${#bs[@]} \
-    "$(printf "%s\n" "${bs[@]/#//}")" \
+    "${tags[@]}" \
     3>&1 1>&2 2>&3) || return
   tar xzf "$SSH_BACKUP_DIR/$CH" -C "$SSH_DIR"
   whiptail --msgbox "Backup restauré : $CH" 6 60
@@ -318,8 +329,8 @@ auto_open_toggle(){
 }
 
 # ─── Menu principal ────────────────────────────────────────────────────────
+cleanup_stale
 if [[ "${1:-}" == "--menu" ]]; then
-  cleanup_stale
   while :; do
     SECTION=$(whiptail --title "Secure Env" --menu "Menu" 15 60 4 \
       Environnement "Environnement" \
