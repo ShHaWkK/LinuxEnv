@@ -26,7 +26,6 @@ BACKUP="$HOME/env_backups"
 SSH_DIR="$MOUNT/ssh"
 GPG_DIR="$MOUNT/gpg"
 SSH_BACKUP_DIR="$BACKUP/ssh_wallets"
-AUTO_FLAG="$HOME/.env_auto_open"
 ALIAS_LINK="$HOME/.aliases_env"
 LOG="/tmp/env2.log"
 : >"$LOG"
@@ -55,6 +54,15 @@ show_summary(){
   whiptail --title "Résumé Opération" --textbox "$LOG" 20 70
 }
 
+cleanup_stale(){
+  if mountpoint -q "$MOUNT"; then
+    umount "$MOUNT" && log "[OK] point de montage nettoyé"
+  fi
+  if cryptsetup status "$MAPPER" &>/dev/null; then
+    cryptsetup close "$MAPPER" && log "[OK] mapper fermé"
+  fi
+}
+
 # ─── Partie I & IV : Environnement LUKS/ext4 ─────────────────────────────────
 ask_pass(){
   read -p "Taille conteneur (ex:5G,500M) [${DEFAULT_SIZE}] : " SIZE
@@ -65,6 +73,7 @@ ask_pass(){
 }
 
 install_env(){
+  cleanup_stale
   log "== INSTALL ENV =="
   ask_pass
 
@@ -107,6 +116,7 @@ install_env(){
 }
 
 open_env(){
+  cleanup_stale
   log "== OPEN ENV =="
   [[ ! -f "$CONTAINER" ]] && { log "[ER] Conteneur manquant"; show_summary; return; }
   if ! cryptsetup status "$MAPPER" &>/dev/null; then
@@ -150,6 +160,7 @@ status_env(){
   log "== STATUS ENV =="
   lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT >>"$LOG"
   df -Th | grep -E "$MAPPER|Filesystem" >>"$LOG"
+  cryptsetup status "$MAPPER" >>"$LOG" 2>&1 || echo "mapper fermé" >>"$LOG"
   show_summary
 }
 
@@ -213,16 +224,15 @@ ssh_create_template(){
     >"$SSH_DIR/sshconf_$CH"
   log "[OK] Template sshconf_$CH créé"
   whiptail --msgbox "Template '$CH' créé → $SSH_DIR/sshconf_$CH" 6 60
+  show_summary
 }
 
-ssh_import_host(){ ssh_create_template; }
 
 ssh_setup_alias(){
   log "== SSH SETUP ALIAS =="
   echo "alias evsh='ssh -F $SSH_DIR/sshconf_*'" >"$ALIAS_LINK"
-  ln -sf "$ALIAS_LINK" "$USER_HOME/.aliases_env"
-  whiptail --msgbox "Alias 'evsh' prêt (source ~/.aliases_env)." 6 60
   log "[OK] Alias evsh créé"
+  show_summary
 }
 
 ssh_start(){
@@ -247,6 +257,7 @@ ssh_delete(){
   rm -rf "$SSH_DIR"/*
   whiptail --msgbox "Vault SSH vidé." 6 50
   log "[OK] Vault SSH vidé"
+  show_summary
 }
 
 ssh_backup(){
@@ -255,6 +266,7 @@ ssh_backup(){
   tar czf "$SSH_BACKUP_DIR/ssh_wallet_$ts.tar.gz" -C "$SSH_DIR" .
   whiptail --msgbox "Backup SSH → ssh_wallet_$ts.tar.gz" 6 60
   log "[OK] SSH backup $ts créé"
+  show_summary
 }
 
 restore_ssh_wallet(){
@@ -272,35 +284,34 @@ restore_ssh_wallet(){
   tar xzf "$SSH_BACKUP_DIR/$CH" -C "$SSH_DIR"
   whiptail --msgbox "Backup restauré : $CH" 6 60
   log "[OK] SSH wallet restauré ($CH)"
+  show_summary
 }
 
 auto_open_toggle(){
-  log "== AUTO-OPEN =="
-  if [[ -f "$AUTO_FLAG" ]]; then
-    sed -i "\|script2.sh open_env|d" "$USER_HOME/.bashrc"
-    rm -f "$AUTO_FLAG"
-    whiptail --msgbox "Auto-open désactivé." 6 50
+  log "== AUTO-OPEN TOGGLE =="
+  if grep -q "secure_env.sh open_env" "$HOME/.bashrc"; then
+    sed -i "/secure_env.sh open_env/d" "$HOME/.bashrc"
     log "[OK] Auto-open OFF"
   else
-    echo "$PWD/script2.sh open_env" >>"$USER_HOME/.bashrc"
-    touch "$AUTO_FLAG"
-    whiptail --msgbox "Auto-open activé." 6 50
+    echo "$PWD/secure_env.sh open_env" >>"$HOME/.bashrc"
     log "[OK] Auto-open ON"
   fi
+  show_summary
 }
 
 # ─── Menu principal ────────────────────────────────────────────────────────
 if [[ "${1:-}" == "--menu" ]]; then
+  cleanup_stale
   while :; do
-    SECTION=$(whiptail --title "Coffre Sécurisé" --menu "Section" 15 60 4 \
-      Env "Environnement" \
-      GPG "Cryptographie" \
-      SSH "Configuration SSH" \
-      Quit "Quitter" \
+    SECTION=$(whiptail --title "Secure Env" --menu "Menu" 15 60 4 \
+      Environnement "Environnement" \
+      Cryptographie "Cryptographie" \
+      SSH "SSH" \
+      Quitter "Quitter" \
       3>&1 1>&2 2>&3) || exit
 
     case $SECTION in
-      Env)
+      Environnement)
         ACTION=$(whiptail --title "Environnement" --menu "Choisissez" 20 60 6 \
           install_env "Installer" \
           open_env    "Ouvrir"    \
@@ -311,7 +322,7 @@ if [[ "${1:-}" == "--menu" ]]; then
           3>&1 1>&2 2>&3)
         [[ -n "$ACTION" ]] && $ACTION
         ;;
-      GPG)
+      Cryptographie)
         ACTION=$(whiptail --title "GPG" --menu "Choisissez" 15 60 2 \
           gpg_setup  "Setup" \
           gpg_import "Import" \
@@ -319,9 +330,8 @@ if [[ "${1:-}" == "--menu" ]]; then
         [[ -n "$ACTION" ]] && $ACTION
         ;;
       SSH)
-        ACTION=$(whiptail --title "SSH" --menu "Choisissez" 25 60 8 \
+        ACTION=$(whiptail --title "SSH" --menu "Choisissez" 25 60 7 \
           ssh_create_template "ssh-create-template" \
-          ssh_import_host     "ssh-import-host"     \
           ssh_setup_alias     "ssh-setup-alias"     \
           ssh_start           "ssh-start"           \
           ssh_delete          "ssh-delete"          \
@@ -331,7 +341,7 @@ if [[ "${1:-}" == "--menu" ]]; then
           3>&1 1>&2 2>&3)
         [[ -n "$ACTION" ]] && $ACTION
         ;;
-      Quit) exit 0 ;;
+      Quitter) exit 0 ;;
     esac
   done
 else
