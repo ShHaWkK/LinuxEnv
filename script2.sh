@@ -1,6 +1,5 @@
 #!/bin/bash
-# Author : ShHawk alias Alexandre Uzan
-# Sujet  : Coffre Sécurisé complet (LUKS, ext4, GPG, SSH, menu interactif)
+# Secure Environment toolbox
 
 set -euo pipefail
 export PATH="$PATH:/sbin:/usr/sbin"
@@ -37,7 +36,7 @@ else
 fi
 SSH_CONFIG="$USER_HOME/.ssh/config"
 
-mkdir -p "$MOUNT" "$BACKUP" "$SSH_DIR" "$GPG_DIR" "$SSH_BACKUP_DIR"
+mkdir -p "$MOUNT" "$BACKUP" "$SSH_BACKUP_DIR"
 
 # ─── Spinner ─────────────────────────────────────────────────────────────────
 spinner(){
@@ -61,6 +60,14 @@ cleanup_stale(){
   if cryptsetup status "$MAPPER" &>/dev/null; then
     cryptsetup close "$MAPPER" && log "[OK] mapper fermé"
   fi
+}
+
+check_mounted(){
+  mountpoint -q "$MOUNT" || {
+    whiptail --msgbox "Environnement non monté" 8 40
+    log "[ER] environnement non monté"
+    return 1
+  }
 }
 
 # ─── Partie I & IV : Environnement LUKS/ext4 ─────────────────────────────────
@@ -110,6 +117,7 @@ install_env(){
 
   mount "/dev/mapper/$MAPPER" "$MOUNT"
   chmod -R go-rwx "$MOUNT"
+  mkdir -p "$SSH_DIR" "$GPG_DIR"
   log "[OK] Monté sur $MOUNT"
 
   show_summary
@@ -126,6 +134,7 @@ open_env(){
     log "[OK] LUKS ouvert"
   fi
   mount "/dev/mapper/$MAPPER" "$MOUNT"
+  mkdir -p "$SSH_DIR" "$GPG_DIR"
   log "[OK] Monté sur $MOUNT"
   show_summary
 }
@@ -167,6 +176,8 @@ status_env(){
 # ─── Partie II : GPG automatisé ─────────────────────────────────────────────
 gpg_setup(){
   log "== GPG SETUP =="
+  check_mounted || return
+  mkdir -p "$GPG_DIR"
   read -p "Nom        : " N
   read -p "Email      : " E
   read -p "Commentaire: " C
@@ -196,6 +207,7 @@ EOF
 
 gpg_import(){
   log "== GPG IMPORT =="
+  check_mounted || return
   for f in "$GPG_DIR"/*.gpg; do
     gpg --import "$f" && log "[OK] Import $f"
   done
@@ -205,6 +217,7 @@ gpg_import(){
 # ─── Partie III : SSH avancé ────────────────────────────────────────────────
 ssh_create_template(){
   log "== SSH CREATE TEMPLATE =="
+  check_mounted || return
   [[ ! -f "$SSH_CONFIG" ]] && {
     whiptail --msgbox "Aucun ~/.ssh/config" 6 50
     log "[ER] Pas de ~/.ssh/config"
@@ -230,6 +243,7 @@ ssh_create_template(){
 
 ssh_setup_alias(){
   log "== SSH SETUP ALIAS =="
+  check_mounted || return
   echo "alias evsh='ssh -F $SSH_DIR/sshconf_*'" >"$ALIAS_LINK"
   log "[OK] Alias evsh créé"
   show_summary
@@ -237,6 +251,7 @@ ssh_setup_alias(){
 
 ssh_start(){
   log "== SSH START =="
+  check_mounted || return
   mapfile -t cfgs < <(ls "$SSH_DIR"/sshconf_* 2>/dev/null)
   [[ ${#cfgs[@]} -eq 0 ]] && {
     whiptail --msgbox "Aucune config SSH trouvée" 6 50
@@ -254,6 +269,7 @@ ssh_start(){
 
 ssh_delete(){
   log "== SSH DELETE =="
+  check_mounted || return
   rm -rf "$SSH_DIR"/*
   whiptail --msgbox "Vault SSH vidé." 6 50
   log "[OK] Vault SSH vidé"
@@ -262,6 +278,7 @@ ssh_delete(){
 
 ssh_backup(){
   log "== SSH BACKUP =="
+  check_mounted || return
   ts=$(date +%Y%m%d_%H%M%S)
   tar czf "$SSH_BACKUP_DIR/ssh_wallet_$ts.tar.gz" -C "$SSH_DIR" .
   whiptail --msgbox "Backup SSH → ssh_wallet_$ts.tar.gz" 6 60
@@ -271,6 +288,7 @@ ssh_backup(){
 
 restore_ssh_wallet(){
   log "== SSH RESTORE =="
+  check_mounted || return
   mapfile -t bs < <(ls "$SSH_BACKUP_DIR"/ssh_wallet_*.tar.gz 2>/dev/null)
   [[ ${#bs[@]} -eq 0 ]] && {
     whiptail --msgbox "Aucune sauvegarde SSH" 6 50
@@ -320,14 +338,20 @@ if [[ "${1:-}" == "--menu" ]]; then
           backup_env  "Backup"    \
           status_env  "Statut"    \
           3>&1 1>&2 2>&3)
-        [[ -n "$ACTION" ]] && $ACTION
+        if [[ -n "$ACTION" ]]; then
+          $ACTION
+          whiptail --msgbox "Opération terminée" 8 40
+        fi
         ;;
       Cryptographie)
         ACTION=$(whiptail --title "GPG" --menu "Choisissez" 15 60 2 \
           gpg_setup  "Setup" \
           gpg_import "Import" \
           3>&1 1>&2 2>&3)
-        [[ -n "$ACTION" ]] && $ACTION
+        if [[ -n "$ACTION" ]]; then
+          $ACTION
+          whiptail --msgbox "Opération terminée" 8 40
+        fi
         ;;
       SSH)
         ACTION=$(whiptail --title "SSH" --menu "Choisissez" 25 60 7 \
@@ -339,7 +363,10 @@ if [[ "${1:-}" == "--menu" ]]; then
           restore_ssh_wallet  "restore-ssh-wallet"  \
           auto_open_toggle    "auto-open"           \
           3>&1 1>&2 2>&3)
-        [[ -n "$ACTION" ]] && $ACTION
+        if [[ -n "$ACTION" ]]; then
+          $ACTION
+          whiptail --msgbox "Opération terminée" 8 40
+        fi
         ;;
       Quitter) exit 0 ;;
     esac
