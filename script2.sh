@@ -3,14 +3,15 @@
 set -euo pipefail
 export PATH="$PATH:/sbin:/usr/sbin"
 
-# ─── Couleurs & Log ─────────────────────────────────────────────────────────
-RED='\e[31m'   ; GREEN='\e[32m' ; BLUE='\e[34m'  ; NC='\e[0m'
-LOG="/tmp/secure_env.log"
-: >"$LOG"
-log()    { echo "[$(date +%T)] $*" >>"$LOG"; }
-info()   { echo -e "${BLUE}$*${NC}"; }
-success(){ echo -e "${GREEN}$*${NC}"; }
-error()  { echo -e "${RED}$*${NC}" >&2; }
+# ─── Couleurs & log ─────────────────────────────────────────────────────────
+RED='\e[31m'; GREEN='\e[32m'; BLUE='\e[34m'; NC='\e[0m'
+LOG="/tmp/secure_env.log"; : >"$LOG"
+# FD 3 → terminal
+exec 3>&1
+log(){ echo "[$(date +%T)] $*" >>"$LOG"; }
+info(){ echo -e "${BLUE}$*${NC}" >&3; }
+success(){ echo -e "${GREEN}$*${NC}" >&3; }
+error(){ echo -e "${RED}$*${NC}" >&2; }
 
 # ─── Variables globales ────────────────────────────────────────────────────
 DEFAULT_SIZE="5G"
@@ -24,26 +25,29 @@ SSH_BACKUP="$BACKUP/ssh_wallets"
 ALIAS_LINK="$HOME/.aliases_env"
 
 # ─── Pré-vérifications ──────────────────────────────────────────────────────
-(( EUID==0 )) || { error "Relancez en root !"; exit 1; }
+(( EUID==0 )) || { error "🚨 Relancez en root !"; exit 1; }
 for cmd in cryptsetup mkfs.ext4 mount umount fallocate dd losetup lsblk df blkid pv whiptail gpg ssh-keygen tar; do
-  command -v "$cmd" &>/dev/null || { error "⛔ $cmd manquant"; exit 1; }
+  command -v "$cmd" &>/dev/null || { error "🚨 '$cmd' manquant"; exit 1; }
 done
 
-# ─── Création dossiers ──────────────────────────────────────────────────────
+# ─── Création des dossiers ──────────────────────────────────────────────────
 mkdir -p "${CONTAINER%/*}" "$MOUNT" "$BACKUP" "$SSH_DIR" "$GPG_DIR" "$SSH_BACKUP"
 
 # ─── Spinner pour tâches longues ────────────────────────────────────────────
 spinner(){
   local pid=$1 sp='|/-\' i=0
   while kill -0 "$pid" 2>/dev/null; do
-    printf "\r${BLUE}[ %c ]${NC}" "${sp:i++%${#sp}:1}"; sleep .1
+    printf "\r${BLUE}[ %c ]${NC}" "${sp:i++%${#sp}:1}" >&3
+    sleep .1
   done
-  printf "\r"
+  printf "\r" >&3
 }
 
 # ─── Nettoyage stale mounts/mappers ─────────────────────────────────────────
 cleanup(){
-  if mountpoint -q "$MOUNT"; then umount "$MOUNT" && log "🔸 Démonté $MOUNT"; fi
+  if mountpoint -q "$MOUNT"; then
+    umount "$MOUNT" && log "🔸 Démonté $MOUNT"
+  fi
   if cryptsetup status "$MAPPER" &>/dev/null; then
     cryptsetup close "$MAPPER" && log "🔸 Fermé /dev/mapper/$MAPPER"
   fi
@@ -52,13 +56,13 @@ cleanup(){
 # ─── Affichage résumé (log) ─────────────────────────────────────────────────
 show_summary(){
   whiptail --title "Résumé Opération" --textbox "$LOG" 20 70
+  echo -e "\n— Derniers logs —" >&3
+  tail -n 10 "$LOG" >&3
 }
 
-# ─── Helpers de check ───────────────────────────────────────────────────────
+# ─── Check & mount si nécessaire ────────────────────────────────────────────
 ensure_open(){
-  if [[ ! -f "$CONTAINER" ]]; then
-    error "📦 Conteneur absent"; return 1
-  fi
+  [[ -f "$CONTAINER" ]] || { error "🚨 Conteneur absent"; return 1; }
   if ! cryptsetup status "$MAPPER" &>/dev/null; then
     printf '%s' "$PASS" | cryptsetup open "$CONTAINER" "$MAPPER" --key-file=- && log "🔸 LUKS ouvert"
   fi
@@ -67,7 +71,7 @@ ensure_open(){
   fi
 }
 
-# ─── Part I & IV : Environnement LUKS + ext4 ────────────────────────────────
+# ─── Part I & IV : Environnement LUKS/ext4 ─────────────────────────────────
 ask_pass(){
   read -p "Taille du conteneur (ex:5G,500M) [${DEFAULT_SIZE}] : " SIZE
   SIZE=${SIZE:-$DEFAULT_SIZE}
@@ -80,7 +84,7 @@ install_env(){
   cleanup; log "===== INSTALL ENVIRONMENT ====="
   ask_pass
   if [[ -f "$CONTAINER" ]]; then
-    if whiptail --yesno "Le conteneur existe. Écraser ?" 8 50; then
+    if whiptail --yesno "Le conteneur existe déjà. Écraser ?" 8 50; then
       rm -f "$CONTAINER" && log "🔸 Ancien conteneur supprimé"
     else return; fi
   fi
@@ -91,34 +95,37 @@ install_env(){
       | pv -s $((cnt*1024*1024)) >"$CONTAINER"
   else
     dd if=/dev/zero bs=1M count="$cnt" of="$CONTAINER"
-    log "⚠️ pv absent, pas de barre de progression"
+    log "⚠️ 'pv' absent : pas de barre de progression"
   fi
   chmod 600 "$CONTAINER" && log "🔸 $CONTAINER créé"
   info "Formatage LUKS (tapez YES)…"
   printf '%s' "$PASS" \
-    | cryptsetup luksFormat --batch-mode "$CONTAINER" --key-file=- & spinner $! && log "🔸 LUKS formaté"
+    | cryptsetup luksFormat --batch-mode "$CONTAINER" --key-file=- &
+  spinner $! && log "🔸 LUKS formaté"
   info "Ouverture LUKS…"
   printf '%s' "$PASS" | cryptsetup open "$CONTAINER" "$MAPPER" --key-file=- && log "🔸 /dev/mapper/$MAPPER"
   info "Formatage ext4…"
-  mkfs.ext4 /dev/mapper/"$MAPPER" & spinner $! && log "🔸 ext4 créé"
+  mkfs.ext4 /dev/mapper/"$MAPPER" & spinner $! && log "🔸 ext4 ok"
   info "Montage…"
   mount /dev/mapper/"$MAPPER" "$MOUNT" && chmod -R go-rwx "$MOUNT" && log "🔸 Monté $MOUNT"
-  success "✅ Install & mount OK"; show_summary
+  success "✅ Install & mount OK"
+  show_summary
 }
 
 open_env(){
-  log "===== OPEN ENVIRONMENT ====="
+  cleanup; log "===== OPEN ENVIRONMENT ====="
   read -s -p "Passphrase LUKS : " PASS; echo
-  cleanup || true
   ensure_open || { show_summary; return; }
-  success "✅ Environment ouvert et monté"; show_summary
+  success "✅ Environment ouvert et monté"
+  show_summary
 }
 
 close_env(){
   log "===== CLOSE ENVIRONMENT ====="
   umount "$MOUNT" &>/dev/null && log "🔸 Démonté $MOUNT"
   cryptsetup close "$MAPPER" && log "🔸 Fermé $MAPPER"
-  success "✅ Environment fermé"; show_summary
+  success "✅ Environment fermé"
+  show_summary
 }
 
 delete_env(){
@@ -127,7 +134,8 @@ delete_env(){
   cryptsetup close "$MAPPER" &>/dev/null||:
   rm -f "$CONTAINER" && log "🔸 $CONTAINER supprimé"
   rmdir "$MOUNT" 2>/dev/null||:
-  success "✅ Environment supprimé"; show_summary
+  success "✅ Environment supprimé"
+  show_summary
 }
 
 backup_env(){
@@ -136,7 +144,8 @@ backup_env(){
   cp "$CONTAINER" "$BACKUP/env_${ts}.img"
   cryptsetup luksHeaderBackup "$CONTAINER" \
     --header-backup-file "$BACKUP/env_${ts}.header"
-  success "✅ Backup → $BACKUP/env_${ts}.img + .header"; show_summary
+  success "✅ Backup créé dans $BACKUP"
+  show_summary
 }
 
 status_env(){
@@ -147,7 +156,7 @@ status_env(){
   show_summary
 }
 
-# ─── Part II : GPG ───────────────────────────────────────────────────────────
+# ─── Part II : GPG automatisé ───────────────────────────────────────────────
 gpg_setup(){
   log "===== GPG SETUP ====="
   ensure_open || { whiptail --msgbox "Environnement non monté" 8 50; return; }
@@ -168,13 +177,14 @@ EOF
   gpg --batch --generate-key gpg-batch && rm -f gpg-batch
   key=$(gpg --list-secret-keys --with-colons|awk -F: '/^sec/ {print $5;exit}')
   gpg --export --armor "$key" >"$GPG_DIR/public_${key}.gpg"
-  log "🔸 Clé publique exportée"
+  log "🔸 Clé publique → $GPG_DIR/public_${key}.gpg"
   if whiptail --yesno "Exporter la clé privée ?" 8 50; then
     gpg --export-secret-keys --armor "$key" >"$GPG_DIR/private_${key}.gpg"
     chmod 600 "$GPG_DIR/private_${key}.gpg"
-    log "🔸 Clé privée exportée"
+    log "🔸 Clé privée → $GPG_DIR/private_${key}.gpg"
   fi
-  success "✅ GPG setup terminé → fichiers dans $GPG_DIR"; show_summary
+  success "✅ GPG setup terminé"
+  show_summary
 }
 
 gpg_import(){
@@ -183,91 +193,79 @@ gpg_import(){
   for f in "$GPG_DIR"/*.gpg; do
     gpg --import "$f" && log "🔸 Importé $f"
   done
-  success "✅ Import GPG terminé depuis → $GPG_DIR"; show_summary
+  success "✅ Import GPG terminé"
+  show_summary
 }
 
-# ─── Part III : SSH ──────────────────────────────────────────────────────────
+# ─── Part III : SSH avancé ──────────────────────────────────────────────────
 ssh_create_template(){
   log "===== SSH CREATE TEMPLATE ====="
   ensure_open || { whiptail --msgbox "Environnement non monté" 8 50; return; }
   [[ ! -f ~/.ssh/config ]] && { whiptail --msgbox "Pas de ~/.ssh/config" 6 50; return; }
   mapfile -t hosts < <(grep '^Host ' ~/.ssh/config|awk '{print $2}')
   [[ ${#hosts[@]} -eq 0 ]] && { whiptail --msgbox "Aucun host" 6 50; return; }
-  CH=$(whiptail --menu "Choisissez host" 15 60 6 "${hosts[@]/#//}" 3>&1 1>&2 2>&3)||return
+  CH=$(whiptail --menu "Choisissez host" 15 60 ${#hosts[@]} \
+       "${hosts[@]/#//}" 3>&1 1>&2 2>&3) || return
   awk "/^Host $CH\$/,/^Host /" ~/.ssh/config >"$SSH_DIR/sshconf_$CH"
-  success "✅ Template créé → $SSH_DIR/sshconf_$CH"
-}
-
-ssh_import_host(){
-  log "===== SSH IMPORT HOST ====="
-  ensure_open || { whiptail --msgbox "Environnement non monté" 8 50; return; }
-  [[ ! -f ~/.ssh/config ]] && { whiptail --msgbox "Pas de ~/.ssh/config" 6 50; return; }
-  mapfile -t hosts < <(grep '^Host ' ~/.ssh/config|awk '{print $2}')
-  CH=$(whiptail --menu "Importer host" 15 60 6 "${hosts[@]/#//}" 3>&1 1>&2 2>&3)||return
-  dst_conf="$SSH_DIR/sshconf_$CH"
-  dst_keydir="$SSH_DIR/keys_$CH"
-  mkdir -p "$dst_keydir"
-  # extrait config
-  awk "/^Host $CH\$/,/^Host /" ~/.ssh/config >"$dst_conf"
-  # trouve IdentityFile et copie la clé
-  idfile=$(grep -m1 'IdentityFile' "$dst_conf" |awk '{print $2}')
-  if [[ -f "$idfile" ]]; then
-    cp "$idfile" "$dst_keydir/" && chmod 600 "$dst_keydir/$(basename "$idfile")"
-    sed -i "s|$idfile|$dst_keydir/$(basename "$idfile")|" "$dst_conf"
-    log "🔸 Clé copiée → $dst_keydir/$(basename "$idfile")"
-  fi
-  success "✅ SSH host '$CH' importé → config: $dst_conf${idfile:+ , clé : $dst_keydir/$(basename "$idfile")}"
+  msg="✅ SSH template créé → $SSH_DIR/sshconf_$CH"
+  log "🔸 $msg"; echo "$msg" >&3
 }
 
 ssh_setup_alias(){
   log "===== SSH SETUP ALIAS ====="
   echo "alias evsh='ssh -F $SSH_DIR/sshconf_*'" >"$ALIAS_LINK"
-  success "✅ Alias evsh prêt"
+  msg="✅ Alias evsh prêt (→ $ALIAS_LINK)"
+  log "🔸 $msg"; echo "$msg" >&3
 }
 
 ssh_start(){
   log "===== SSH START ====="
   mapfile -t cfgs < <(ls "$SSH_DIR"/sshconf_* 2>/dev/null)
-  [[ ${#cfgs[@]} -eq 0 ]] && { whiptail --msgbox "Pas de configs" 6 50; return; }
+  [[ ${#cfgs[@]} -eq 0 ]] && { whiptail --msgbox "Pas de configs SSH" 6 50; return; }
   tags=(); for f in "${cfgs[@]}"; do tags+=( "$(basename "$f")" "" ); done
-  CH=$(whiptail --menu "Sélection config" 15 60 ${#cfgs[@]} "${tags[@]}" 3>&1 1>&2 2>&3)||return
+  CH=$(whiptail --menu "Sélection config SSH" 15 60 ${#cfgs[@]} "${tags[@]}" 3>&1 1>&2 2>&3) || return
   ssh -F "$SSH_DIR/$CH"
 }
 
 ssh_delete(){
   log "===== SSH DELETE ====="
-  rm -rf "$SSH_DIR"/* && success "✅ Coffre SSH vidé"
+  rm -rf "$SSH_DIR"/* && msg="✅ Coffre SSH vidé"
+  log "🔸 $msg"; echo "$msg" >&3
 }
 
 ssh_backup(){
   log "===== SSH BACKUP ====="
   ts=$(date +%Y%m%d_%H%M%S)
   tar czf "$SSH_BACKUP/ssh_wallet_${ts}.tar.gz" -C "$SSH_DIR" .
-  success "✅ SSH backup → $SSH_BACKUP/ssh_wallet_${ts}.tar.gz"
+  msg="✅ SSH backup → $SSH_BACKUP/ssh_wallet_${ts}.tar.gz"
+  log "🔸 $msg"; echo "$msg" >&3
 }
 
 restore_ssh_wallet(){
   log "===== RESTORE SSH WALLET ====="
   mapfile -t bs < <(ls "$SSH_BACKUP"/ssh_wallet_*.tar.gz 2>/dev/null)
   [[ ${#bs[@]} -eq 0 ]] && { whiptail --msgbox "Pas de backup SSH" 6 50; return; }
-  CH=$(whiptail --menu "Choisissez backup" 15 60 ${#bs[@]} "$(printf "%s\n" "${bs[@]/#//}")" 3>&1 1>&2 2>&3)||return
+  CH=$(whiptail --menu "Choisissez backup SSH" 15 60 ${#bs[@]} \
+       "$(printf "%s\n" "${bs[@]/#//}")" 3>&1 1>&2 2>&3) || return
   tar xzf "$SSH_BACKUP/$CH" -C "$SSH_DIR"
-  success "✅ SSH wallet restauré"
+  msg="✅ SSH wallet restauré → $CH"
+  log "🔸 $msg"; echo "$msg" >&3
 }
 
 auto_open_toggle(){
   log "===== AUTO-OPEN TOGGLE ====="
   if grep -q "secure_env.sh open_env" ~/.bashrc; then
-    sed -i "/secure_env.sh open_env/d" ~/.bashrc
-    success "✅ Auto-open désactivé"
+    sed -i "\|secure_env.sh open_env|d" ~/.bashrc
+    msg="✅ Auto-open désactivé"
   else
     echo "$PWD/secure_env.sh open_env &>/dev/null" >>~/.bashrc
-    success "✅ Auto-open activé"
+    msg="✅ Auto-open activé"
   fi
+  log "🔸 $msg"; echo "$msg" >&3
 }
 
-# ─── Menu Whiptail ──────────────────────────────────────────────────────────
-if [[ "${1:-}" == "--menu" ]]; then
+# ─── Menu Whiptail principal ───────────────────────────────────────────────
+if [[ "${1-}" == "--menu" ]]; then
   cleanup
   while true; do
     CH=$(whiptail --title "Coffre Sécurisé" --menu "Section :" 20 60 4 \
@@ -286,29 +284,34 @@ if [[ "${1:-}" == "--menu" ]]; then
           backup_env  "Backup"    \
           status_env  "Statut"    \
           3>&1 1>&2 2>&3)
-        [[ -n "$ACTION" ]] && $ACTION ;;
+        [[ -n "$ACTION" ]] && $ACTION
+        ;;
       Cryptographie)
         ACTION=$(whiptail --menu "GPG" 15 60 2 \
           gpg_setup  "Setup" \
           gpg_import "Import"\
           3>&1 1>&2 2>&3)
-        [[ -n "$ACTION" ]] && $ACTION ;;
+        [[ -n "$ACTION" ]] && $ACTION
+        ;;
       SSH)
-        ACTION=$(whiptail --menu "SSH" 20 60 7 \
+        ACTION=$(whiptail --menu "SSH avancé" 20 60 7 \
           ssh_create_template "ssh-create-template" \
-          ssh_import_host      "ssh-import-host"      \
-          ssh_setup_alias      "ssh-setup-alias"      \
-          ssh_start            "ssh-start"            \
-          ssh_delete           "ssh-delete"           \
-          ssh_backup           "ssh-backup"           \
-          restore_ssh_wallet   "restore-ssh-wallet"   \
-          auto_open_toggle     "auto-open"            \
+          ssh_setup_alias     "ssh-setup-alias"     \
+          ssh_start           "ssh-start"           \
+          ssh_delete          "ssh-delete"          \
+          ssh_backup          "ssh-backup"          \
+          restore_ssh_wallet  "restore-ssh-wallet"  \
+          auto_open_toggle    "auto-open"           \
           3>&1 1>&2 2>&3)
-        [[ -n "$ACTION" ]] && $ACTION ;;
-      Quitter) exit ;;
+        [[ -n "$ACTION" ]] && $ACTION
+        ;;
+      Quitter) exit 0 ;;
     esac
     whiptail --msgbox "Opération terminée." 6 50
+    echo >&3
+    echo "— fin opération —" >&3
   done
 else
   echo "Usage : $0 --menu"
+  exit 1
 fi
