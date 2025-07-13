@@ -416,45 +416,6 @@ auto_open_toggle(){
   show_summary
 }
 
-############################ SSH LIST ############################
-ssh_list(){
-  log "== SSH LIST =="
-  ensure_env_open || return
-  [[ -f "$SSH_CONFIG_PATH" ]] || { whiptail --msgbox "Pas de configuration" 8 50 2>/dev/null || error "[X] Pas de configuration"; return; }
-  mapfile -t hosts < <(grep '^Host ' "$SSH_CONFIG_PATH" | awk '{print $2}')
-  (( ${#hosts[@]} )) || { whiptail --msgbox "Aucun host" 8 50 2>/dev/null || error "[X] Aucun host"; return; }
-  if [[ "$INTERACTIVE" -eq 1 && -n "$(command -v whiptail)" ]]; then
-    whiptail --title "SSH Hosts" --msgbox "$(printf '%s\n' "${hosts[@]}")" 20 60
-  else
-    printf '%s\n' "${hosts[@]}" >&3
-  fi
-  log "[OK] liste affichée"
-  local msg="✅ Liste des hosts"
-  success "$msg"; show_summary "$msg"
-}
-
-############################ SSH START ############################
-ssh_start(){
-  log "== SSH START =="
-  ensure_env_open || return
-  [[ -f "$SSH_CONFIG_PATH" ]] || { whiptail --msgbox "Pas de configuration" 8 50 2>/dev/null || error "[X] Pas de configuration"; return; }
-  mapfile -t hosts < <(grep '^Host ' "$SSH_CONFIG_PATH" | awk '{print $2}')
-  (( ${#hosts[@]} )) || { whiptail --msgbox "Aucun host" 8 50 2>/dev/null || error "[X] Aucun host"; return; }
-  local CH
-  if [[ "$INTERACTIVE" -eq 1 && -n "$(command -v whiptail)" ]]; then
-    tags=(); for h in "${hosts[@]}"; do tags+=( "$h" "" ); done
-    CH=$(whiptail --title "ssh-start" --menu "Choisissez host" 15 60 ${#hosts[@]} "${tags[@]}" 3>&1 1>&2 2>&3) || return
-  else
-    printf '%s\n' "${hosts[@]}" >&3
-    read -r -p "Host: " CH
-  fi
-  [[ -n "$CH" ]] || return
-  log "[OK] connexion $CH"
-  ssh -F "$SSH_CONFIG_PATH" "$CH"
-  local msg="✅ SSH terminé"
-  success "$msg"; show_summary "$msg"
-}
-
 ########################## Menu principal & mode direct #########################
 cleanup_stale
 
@@ -490,9 +451,7 @@ if [[ "${1:-}" == "--menu" ]]; then
           ssh_delete          "ssh-delete"          \
           ssh_backup          "ssh-backup"          \
           restore_ssh_wallet  "restore-ssh-wallet"  \
-          auto_open_toggle    "auto-open"           \
-          ssh_list            "--ssh-list"          \
-          ssh_start           "--ssh-start"         3>&1 1>&2 2>&3)
+          auto_open_toggle    "auto-open"           3>&1 1>&2 2>&3)
         [[ -n "$ACTION" ]] && $ACTION ;;
       Quitter) exit 0 ;;
     esac
