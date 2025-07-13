@@ -31,6 +31,7 @@ MAPPER="env_sec"
 MOUNT="$USER_HOME/env_mount"
 BACKUP="$USER_HOME/env_backups"
 SSH_DIR="$MOUNT/ssh"
+SSH_CONFIG_PATH="$SSH_DIR/ssh_config"
 GPG_DIR="$MOUNT/gpg"
 SSH_BACKUP_DIR="$BACKUP/ssh_wallets"
 ALIAS_LINK="$USER_HOME/.aliases_env"
@@ -286,11 +287,11 @@ EOF
     --menu "Choisissez un host :" 15 60 ${#hosts[@]} \
     "${tags[@]}" 3>&1 1>&2 2>&3) || return
 
-  awk "/^Host $CH\$/,/^Host /" "$SSH_CONFIG" >"$SSH_DIR/sshconf_$CH"
+  awk "/^Host $CH\$/,/^Host /" "$SSH_CONFIG" >"$SSH_CONFIG_PATH"
   idf=$(awk "/^Host $CH\$/,/^Host /" "$SSH_CONFIG" | awk '/IdentityFile/ {print $2;exit}')
   if [[ -n "$idf" ]]; then
     cp "$idf" "$SSH_DIR/" && chmod 600 "$SSH_DIR/$(basename "$idf")"
-    sed -i "s|IdentityFile .*|IdentityFile $SSH_DIR/$(basename "$idf")|" "$SSH_DIR/sshconf_$CH"
+    sed -i "s|IdentityFile .*|IdentityFile $SSH_DIR/$(basename "$idf")|" "$SSH_CONFIG_PATH"
   fi
 
   log "[OK] Template sshconf_$CH créé"
@@ -300,7 +301,8 @@ EOF
 ssh_setup_alias(){
   log "== SSH SETUP ALIAS =="
   ensure_env_open || return
-  echo "alias evsh='ssh -F $SSH_DIR/sshconf_*'" >"$ALIAS_LINK"
+  HOST_ALIAS=$(awk '/^Host /{print $2;exit}' "$SSH_CONFIG_PATH" 2>/dev/null)
+  echo "alias evsh='ssh -F $SSH_CONFIG_PATH ${HOST_ALIAS}'" >"$ALIAS_LINK"
   log "[OK] alias evsh dans $ALIAS_LINK"
   local msg="✅ Alias prêt (source $ALIAS_LINK)"
   success "$msg"; show_summary "$msg"
@@ -314,28 +316,14 @@ ssh_import_host(){
   (( ${#hosts[@]} )) || { whiptail --msgbox "Aucun host" 6 50; return; }
   tags=(); for h in "${hosts[@]}"; do tags+=( "$h" "" ); done
   CH=$(whiptail --menu "Choisissez host" 15 60 ${#hosts[@]} "${tags[@]}" 3>&1 1>&2 2>&3) || return
-  awk "/^Host $CH$/,/^Host /" "$SSH_CONFIG" >"$SSH_DIR/sshconf_$CH"
+  awk "/^Host $CH$/,/^Host /" "$SSH_CONFIG" >"$SSH_CONFIG_PATH"
   idf=$(awk "/^Host $CH$/,/^Host /" "$SSH_CONFIG" | awk '/IdentityFile/ {print $2;exit}')
   if [[ -n "$idf" ]]; then
     cp "$idf" "$SSH_DIR/"; chmod 600 "$SSH_DIR/$(basename "$idf")"
-    sed -i "s|$idf|$SSH_DIR/$(basename "$idf")|" "$SSH_DIR/sshconf_$CH"
+    sed -i "s|$idf|$SSH_DIR/$(basename "$idf")|" "$SSH_CONFIG_PATH"
   fi
   log "[OK] Host $CH importé"
-  local msg="✅ SSH host importé → $SSH_DIR/sshconf_$CH"
-  success "$msg"; show_summary "$msg"
-}
-
-ssh_start(){
-  log "== SSH START =="
-  ensure_env_open || return
-  mapfile -t cfgs < <(ls "$SSH_DIR"/sshconf_* 2>/dev/null)
-  (( ${#cfgs[@]} )) || { whiptail --msgbox "Aucune config SSH" 6 50; return; }
-  tags=(); for f in "${cfgs[@]}"; do tags+=( "$(basename "$f")" "" ); done
-  CH=$(whiptail --menu "Choisissez config" 15 60 ${#cfgs[@]} "${tags[@]}" 3>&1 1>&2 2>&3) || return
-  HOST_ALIAS=$(awk '/^Host /{print $2;exit}' "$SSH_DIR/$CH")
-  ssh -F "$SSH_DIR/$CH" "$HOST_ALIAS"
-  log "[OK] Session SSH $CH terminée"
-  local msg="✅ SSH session $CH terminée"
+  local msg="✅ SSH host importé → $SSH_CONFIG_PATH"
   success "$msg"; show_summary "$msg"
 }
 
@@ -411,11 +399,10 @@ if [[ "${1:-}" == "--menu" ]]; then
           gpg_import "Import" 3>&1 1>&2 2>&3)
         [[ -n "$ACTION" ]] && $ACTION ;;
       SSH)
-        ACTION=$(whiptail --title "SSH" --menu "Choisissez" 25 60 8 \
+        ACTION=$(whiptail --title "SSH" --menu "Choisissez" 20 60 6 \
           ssh_create_template "ssh-create-template" \
           ssh_setup_alias     "ssh-setup-alias"     \
           ssh_import_host     "ssh-import-host"     \
-          ssh_start           "ssh-start"           \
           ssh_delete          "ssh-delete"          \
           ssh_backup          "ssh-backup"          \
           restore_ssh_wallet  "restore-ssh-wallet"  \
