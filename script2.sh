@@ -6,7 +6,7 @@ export PATH="$PATH:/sbin:/usr/sbin"
 
 # ─── Couleurs et logs ─────────────────────────────────────────────────────────
 RED='\e[31m'; GREEN='\e[32m'; BLUE='\e[34m'; NC='\e[0m'
-LOG="/tmp/secure_env.log"; : >"$LOG"
+LOG="/tmp/env2.log"; : >"$LOG"
 exec 3>&1
 log(){ echo "[$(date +%T)] $*" >>"$LOG"; }
 info(){ echo -e "${BLUE}$*${NC}" >&3; }
@@ -54,11 +54,14 @@ spinner(){
 
 # ─── Affichage résumé ────────────────────────────────────────────────────────
 show_summary(){
+  local msg="${1:-}"
   if [[ ${INTERACTIVE:-0} -eq 1 ]]; then
     whiptail --title "Résumé Opération" --textbox "$LOG" 20 70
+    [[ -n "$msg" ]] && whiptail --msgbox "$msg" 8 50
   fi
   echo -e "\n— Derniers logs —" >&3
   tail -n 10 "$LOG" >&3
+  [[ -n "$msg" ]] && echo "$msg" >&3
 }
 
 cleanup_stale(){
@@ -102,12 +105,14 @@ install_env(){
   local cnt=${SIZE%[GgMm]}; [[ "$SIZE" =~ [Gg]$ ]] && cnt=$((cnt*1024))
   info "Création du fichier ($SIZE)…"
   if command -v fallocate &>/dev/null; then
-    fallocate -l "$SIZE" "$CONTAINER"
+    fallocate -l "$SIZE" "$CONTAINER" &
+    spinner $!
   elif command -v pv &>/dev/null; then
-    dd if=/dev/zero bs=1M count="$cnt" status=none \
-      | pv -s $((cnt*1024*1024)) >"$CONTAINER"
+    (dd if=/dev/zero bs=1M count="$cnt" status=none | pv -s $((cnt*1024*1024)) >"$CONTAINER") &
+    spinner $!
   else
-    dd if=/dev/zero bs=1M count="$cnt" >"$CONTAINER"
+    dd if=/dev/zero bs=1M count="$cnt" of="$CONTAINER" &
+    spinner $!
     log "[!pv] pas de barre de progression"
   fi
   chmod 600 "$CONTAINER"
@@ -132,13 +137,15 @@ install_env(){
   chmod -R go-rwx "$MOUNT"
   mkdir -p "$SSH_DIR" "$GPG_DIR"
   log "[OK] Monté sur $MOUNT"
-  success "✅ Install & mount OK"
-  show_summary
+  local msg="✅ Install & mount OK"
+  success "$msg"
+  show_summary "$msg"
 }
 
 open_env(){
+  cleanup_stale
   log "== OPEN ENV =="
-  [[ ! -f "$CONTAINER" ]] && { log "[ER] Conteneur manquant"; show_summary; return; }
+  [[ ! -f "$CONTAINER" ]] && { log "[ER] Conteneur manquant"; show_summary "❌ Conteneur manquant"; return; }
   if ! cryptsetup status "$MAPPER" &>/dev/null; then
     read -s -p "Passphrase LUKS : " PASS; echo
     info "Ouverture LUKS…"
@@ -149,16 +156,18 @@ open_env(){
   mountpoint -q "$MOUNT" || mount "/dev/mapper/$MAPPER" "$MOUNT"
   mkdir -p "$SSH_DIR" "$GPG_DIR"
   log "[OK] Monté sur $MOUNT"
-  success "✅ Environment ouvert et monté"
-  show_summary
+  local msg="✅ Environment ouvert et monté"
+  success "$msg"
+  show_summary "$msg"
 }
 
 close_env(){
   log "== CLOSE ENV =="
   mountpoint -q "$MOUNT" && umount "$MOUNT" && log "[OK] Démonté"
   cryptsetup close "$MAPPER" && log "[OK] LUKS fermé"
-  success "✅ Environment fermé"
-  show_summary
+  local msg="✅ Environment fermé"
+  success "$msg"
+  show_summary "$msg"
 }
 
 delete_env(){
@@ -167,8 +176,9 @@ delete_env(){
   cryptsetup close "$MAPPER" &>/dev/null||:
   rm -f "$CONTAINER" && log "[OK] Conteneur supprimé"
   rmdir "$MOUNT" 2>/dev/null||:
-  success "✅ Environment supprimé"
-  show_summary
+  local msg="✅ Environment supprimé"
+  success "$msg"
+  show_summary "$msg"
 }
 
 backup_env(){
@@ -178,8 +188,9 @@ backup_env(){
   cryptsetup luksHeaderBackup "$CONTAINER" \
     --header-backup-file "$BACKUP/env_${ts}.header"
   log "[OK] Backup env+header"
-  success "✅ Backup créé dans $BACKUP"
-  show_summary
+  local msg="✅ Backup créé dans $BACKUP"
+  success "$msg"
+  show_summary "$msg"
 }
 
 status_env(){
@@ -187,8 +198,9 @@ status_env(){
   lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT >>"$LOG"
   df -Th | grep -E "$MAPPER|Filesystem" >>"$LOG"
   cryptsetup status "$MAPPER" >>"$LOG" 2>&1 || echo "mapper fermé" >>"$LOG"
-  success "✅ Statut enregistré"
-  show_summary
+  local msg="✅ Statut enregistré"
+  success "$msg"
+  show_summary "$msg"
 }
 
 # ─── Partie II : GPG automatisé ─────────────────────────────────────────────
@@ -220,8 +232,9 @@ EOF
     chmod 600 "$GPG_DIR/private_${key}.gpg"
     log "[OK] Clé privée exportée"
   fi
-  success "✅ GPG setup terminé"
-  show_summary
+  local msg="✅ GPG setup terminé"
+  success "$msg"
+  show_summary "$msg"
 }
 
 gpg_import(){
@@ -232,8 +245,9 @@ gpg_import(){
     gpg --import "$f" && log "[OK] Import $f"
   done
   shopt -u nullglob
-  success "✅ Import GPG terminé"
-  show_summary
+  local msg="✅ Import GPG terminé"
+  success "$msg"
+  show_summary "$msg"
 }
 
 # ─── Partie III : SSH avancé ────────────────────────────────────────────────
@@ -259,12 +273,14 @@ ssh_create_template(){
   awk "/^Host $CH$/,/^Host /" "$SSH_CONFIG" >"$SSH_DIR/sshconf_$CH"
   idf=$(awk "/^Host $CH$/,/^Host /" "$SSH_CONFIG" | awk '/IdentityFile/ {print $2; exit}')
   if [[ -n "$idf" ]]; then
+    cp "$idf" "$SSH_DIR/" && chmod 600 "$SSH_DIR/$(basename "$idf")"
     sed -i "s|IdentityFile .*|IdentityFile $SSH_DIR/$(basename "$idf")|" "$SSH_DIR/sshconf_$CH"
   fi
   log "[OK] Template sshconf_$CH créé"
+  local msg="✅ SSH template créé : $CH"
   whiptail --msgbox "Template '$CH' créé → $SSH_DIR/sshconf_$CH" 6 60
-  success "✅ SSH template créé"
-  show_summary
+  success "$msg"
+  show_summary "$msg"
 }
 
 
@@ -273,8 +289,9 @@ ssh_setup_alias(){
   ensure_env_open || return
   echo "alias evsh='ssh -F $SSH_DIR/sshconf_*'" >"$ALIAS_LINK"
   log "[OK] Alias evsh créé"
-  success "✅ Alias créé"
-  show_summary
+  local msg="✅ Alias créé"
+  success "$msg"
+  show_summary "$msg"
 }
 
 ssh_import_host(){
@@ -293,8 +310,9 @@ ssh_import_host(){
   fi
   log "[OK] Host $CH importé"
   whiptail --msgbox "Host '$CH' importé" 6 50
-  success "✅ SSH host importé"
-  show_summary
+  local msg="✅ SSH host importé : $CH"
+  success "$msg"
+  show_summary "$msg"
 }
 
 ssh_start(){
@@ -313,7 +331,9 @@ ssh_start(){
     3>&1 1>&2 2>&3) || return
   ssh -F "$SSH_DIR/$CH"
   log "[OK] Session SSH ($CH) terminée"
-  success "✅ Session terminée"
+  local msg="✅ Session terminée"
+  success "$msg"
+  show_summary "$msg"
 }
 
 ssh_delete(){
@@ -322,8 +342,9 @@ ssh_delete(){
   rm -rf "$SSH_DIR"/*
   whiptail --msgbox "Vault SSH vidé." 6 50
   log "[OK] Vault SSH vidé"
-  success "✅ Vault SSH vidé"
-  show_summary
+  local msg="✅ Vault SSH vidé"
+  success "$msg"
+  show_summary "$msg"
 }
 
 ssh_backup(){
@@ -333,8 +354,9 @@ ssh_backup(){
   tar czf "$SSH_BACKUP_DIR/ssh_wallet_$ts.tar.gz" -C "$SSH_DIR" .
   whiptail --msgbox "Backup SSH → ssh_wallet_$ts.tar.gz" 6 60
   log "[OK] SSH backup $ts créé"
-  success "✅ Backup SSH créé"
-  show_summary
+  local msg="✅ Backup SSH créé"
+  success "$msg"
+  show_summary "$msg"
 }
 
 restore_ssh_wallet(){
@@ -354,8 +376,9 @@ restore_ssh_wallet(){
   tar xzf "$SSH_BACKUP_DIR/$CH" -C "$SSH_DIR"
   whiptail --msgbox "Backup restauré : $CH" 6 60
   log "[OK] SSH wallet restauré ($CH)"
-  success "✅ SSH wallet restauré"
-  show_summary
+  local msg="✅ SSH wallet restauré"
+  success "$msg"
+  show_summary "$msg"
 }
 
 auto_open_toggle(){
@@ -367,8 +390,9 @@ auto_open_toggle(){
     echo "$PWD/secure_env.sh open_env &>/dev/null" >>"$HOME/.bashrc"
     log "[OK] Auto-open ON"
   fi
-  success "✅ Option mise à jour"
-  show_summary
+  local msg="✅ Option mise à jour"
+  success "$msg"
+  show_summary "$msg"
 }
 
 # ─── Menu principal ────────────────────────────────────────────────────────
@@ -393,20 +417,14 @@ if [[ "${1:-}" == "--menu" ]]; then
           backup_env  "Backup"    \
           status_env  "Statut"    \
           3>&1 1>&2 2>&3)
-        if [[ -n "$ACTION" ]]; then
-          $ACTION
-          whiptail --msgbox "Opération terminée" 8 40
-        fi
+        [[ -n "$ACTION" ]] && $ACTION
         ;;
       Cryptographie)
         ACTION=$(whiptail --title "GPG" --menu "Choisissez" 15 60 2 \
           gpg_setup  "Setup" \
           gpg_import "Import" \
           3>&1 1>&2 2>&3)
-        if [[ -n "$ACTION" ]]; then
-          $ACTION
-          whiptail --msgbox "Opération terminée" 8 40
-        fi
+        [[ -n "$ACTION" ]] && $ACTION
         ;;
       SSH)
         ACTION=$(whiptail --title "SSH" --menu "Choisissez" 25 60 8 \
@@ -419,10 +437,7 @@ if [[ "${1:-}" == "--menu" ]]; then
           restore_ssh_wallet  "restore-ssh-wallet"  \
           auto_open_toggle    "auto-open"           \
           3>&1 1>&2 2>&3)
-        if [[ -n "$ACTION" ]]; then
-          $ACTION
-          whiptail --msgbox "Opération terminée" 8 40
-        fi
+        [[ -n "$ACTION" ]] && $ACTION
         ;;
       Quitter) exit 0 ;;
     esac
