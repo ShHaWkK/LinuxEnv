@@ -1,40 +1,48 @@
 #!/usr/bin/env bash
-# secure_env.sh — Coffre sécurisé LUKS/ext4 + GPG + SSH + menu Whiptail
-set -euo pipefail
+##############################################################################
+# secure_env.sh — Coffre LUKS/ext4 + GPG + SSH
+# • Menu Whiptail (--menu) ou CLI (install_env, open_env, …)
+# • Journal : $HOME/secure_env.log (root si sudo)
+##############################################################################
+set -Eeuo pipefail
 export PATH="$PATH:/sbin:/usr/sbin"
 
 ##############################################################################
-# Couleurs & logger
+# Couleurs & journal
 ##############################################################################
 RED='\e[31m'; GREEN='\e[32m'; BLUE='\e[34m'; NC='\e[0m'
 
-if [[ -n "${SUDO_USER-}" && "$SUDO_USER" != "root" ]]; then
-  USER_HOME="/home/$SUDO_USER"
-else
-  USER_HOME="$HOME"
-fi
+[[ -n ${SUDO_USER-} && $SUDO_USER != root ]] \
+  && USER_HOME="/home/$SUDO_USER" || USER_HOME="$HOME"
 
-LOG="$USER_HOME/secure_env.log"
-: >"$LOG"
-
+LOG="$USER_HOME/secure_env.log"; : >"$LOG"
 exec 3>&1
+trap 'error "⛔ Erreur ligne $LINENO  –  consultez $LOG"; exit 1' ERR
+
 log()     { echo "[$(date +%T)] $*" >>"$LOG"; }
-info()    { echo -e "${BLUE}$*${NC}" >&3; }
+info()    { echo -e "${BLUE}$*${NC}"  >&3; }
 success() { echo -e "${GREEN}$*${NC}" >&3; }
-error()   { echo -e "${RED}$*${NC}" >&2; }
+error()   { echo -e "${RED}$*${NC}"   >&2; }
 
 ##############################################################################
-# Vérifications préalables
+# Vérifications (soft-fail : avertit mais n’interrompt pas si l’outil est
+# optionnel : pv, whiptail)
 ##############################################################################
-(( EUID == 0 )) || { error "❌ Exécuter en root (sudo)"; exit 1; }
+(( EUID == 0 )) || { error "Exécuter en root (sudo)"; exit 1; }
 
-for cmd in cryptsetup mkfs.ext4 mount umount fallocate dd lsblk df pv \
-           whiptail gpg ssh-keygen ssh-copy-id tar; do
-  command -v "$cmd" &>/dev/null || { error "⛔ $cmd manquant"; exit 1; }
+must_have=(cryptsetup mkfs.ext4 mount umount fallocate dd lsblk df
+           losetup gpg ssh-keygen ssh-copy-id tar chattr)
+opt_have=(pv whiptail)
+
+for b in "${must_have[@]}"; do
+  command -v "$b" &>/dev/null || { error "$b manquant"; exit 1; }
+done
+for b in "${opt_have[@]}"; do
+  command -v "$b" &>/dev/null || info "⚠️  $b non installé ; fonctions associées réduites"
 done
 
 ##############################################################################
-# Variables globales
+# Variables générales
 ##############################################################################
 DEFAULT_SIZE="5G"
 
@@ -43,34 +51,30 @@ MAPPER="env_sec"
 MOUNT="$USER_HOME/env_mount"
 BACKUP="$USER_HOME/env_backups"
 
-# ---- SSH
 SSH_DIR="$MOUNT/ssh"
 SSH_TEMPLATES_DIR="$SSH_DIR/conf"
 SSH_KEYS_DIR="$SSH_DIR/keys"
 ALIAS_FILE_IN_VAULT="$SSH_DIR/aliases_env"
 ALIAS_LINK="$USER_HOME/.aliases_env"
 SSH_CONFIG="$USER_HOME/.ssh/config"
-SSH_CONFIG_PATH_ACTIVE=""
 
-# ---- GPG
 GPG_DIR="$MOUNT/gpg"
 SSH_BACKUP_DIR="$BACKUP/ssh_wallets"
 
-# ---- Autres
 DEFAULT_KEY_TYPE="ed25519"
 INTERACTIVE=0
 
-mkdir -p "${CONTAINER%/*}" "$MOUNT" "$BACKUP" \
-         "$SSH_TEMPLATES_DIR" "$SSH_KEYS_DIR" \
+mkdir -p "$MOUNT" "$BACKUP" "$SSH_TEMPLATES_DIR" "$SSH_KEYS_DIR" \
          "$GPG_DIR" "$SSH_BACKUP_DIR"
 
 ##############################################################################
-# Fonctions utilitaires
+# Utilitaires
 ##############################################################################
-spinner() {
+spinner() {                          # utilisé si pv ou fallocate présents
+  command -v pv &>/dev/null || return
   local pid=$1 sp='|/-\' i=0
   while kill -0 "$pid" 2>/dev/null; do
-    printf "\r${BLUE}[ %c ]${NC}" "${sp:i++%${#sp}:1}"
+    printf "\r${BLUE}[ %c ]${NC}" "${sp:i++%4:1}"
     sleep .1
   done
   printf "\r"
@@ -78,335 +82,201 @@ spinner() {
 
 show_summary() {
   local msg="${1:-}"
-
-  if (( INTERACTIVE )); then
+  (( INTERACTIVE )) && command -v whiptail &>/dev/null && {
     whiptail --title "Résumé" --textbox "$LOG" 20 70
-    [[ -n "$msg" ]] && whiptail --msgbox "$msg" 8 60
-  fi
-
-  echo -e "\n— Derniers logs —" >&3
-  tail -n 10 "$LOG" >&3
-  [[ -n "$msg" ]] && echo "$msg" >&3
+    [[ -n $msg ]] && whiptail --msgbox "$msg" 8 60
+  }
+  tail -n 8 "$LOG" >&3
+  [[ -n $msg ]] && info "$msg"
 }
 
 cleanup_stale() {
-  mountpoint -q "$MOUNT"  && umount "$MOUNT"      && log "[OK] démonté"
+  mountpoint -q "$MOUNT"  && umount "$MOUNT" && log "[OK] démonté"
   cryptsetup status "$MAPPER" &>/dev/null \
-    && cryptsetup close "$MAPPER"          && log "[OK] mapper fermé"
+    && cryptsetup close "$MAPPER" && log "[OK] LUKS fermé"
 }
 
 ensure_env_open() { mountpoint -q "$MOUNT" || open_env; }
 
-set_strict_perms() {
+set_perms() {
   chmod 700 "$SSH_DIR" "$SSH_TEMPLATES_DIR" "$SSH_KEYS_DIR" "$GPG_DIR"
   chmod 600 "$CONTAINER" || true
 }
 
 ##############################################################################
-# PART I / IV : gestion LUKS + ext4
+# PART I / IV — LUKS + ext4
 ##############################################################################
 ask_pass() {
-  read -p "Taille (ex : 5G) [${DEFAULT_SIZE}] : " SIZE
-  SIZE=${SIZE:-$DEFAULT_SIZE}
-
-  read -s -p "Passphrase LUKS : " PASS;  echo
-  read -s -p "Confirmer       : " PASS2; echo
-
-  [[ "$PASS" == "$PASS2" ]] \
-    || { error "❌ Passphrases différentes"; exit 1; }
+  read -rp "Taille (ex : 5G) [${DEFAULT_SIZE}] : " SIZE; SIZE=${SIZE:-$DEFAULT_SIZE}
+  read -rsp "Passphrase : " PASS;  echo
+  read -rsp "Confirmer  : " PASS2; echo
+  [[ $PASS == "$PASS2" ]] || { error "Passphrases différentes"; exit 1; }
 }
 
 install_env() {
-  cleanup_stale
-  log "== INSTALL =="
+  cleanup_stale; log "== INSTALL =="; ask_pass
+  [[ -f $CONTAINER ]] && { rm -f "$CONTAINER"; log "Ancien conteneur supprimé"; }
 
-  ask_pass
+  local cnt=${SIZE%[GgMm]}; [[ $SIZE =~ [Gg]$ ]] && cnt=$((cnt*1024))
+  info "Création conteneur $SIZE…"
+  fallocate -l "$SIZE" "$CONTAINER" 2>/dev/null || \
+    (dd if=/dev/zero bs=1M count="$cnt" | pv -s $((cnt*1024*1024)) >"$CONTAINER") &
+  spinner $!
 
-  if [[ -f "$CONTAINER" ]]; then
-    whiptail --yesno "Conteneur existant. Écraser ?" 8 50 || return
-    rm -f "$CONTAINER"
-  fi
-
-  # ---- Création du fichier
-  local cnt=${SIZE%[GgMm]}
-  [[ "$SIZE" =~ [Gg]$ ]] && cnt=$((cnt * 1024))
-
-  info "Création fichier ($SIZE)…"
-  if command -v fallocate &>/dev/null; then
-    fallocate -l "$SIZE" "$CONTAINER" & spinner $!
-  else
-    ( dd if=/dev/zero bs=1M count="$cnt" \
-        | pv -s $((cnt * 1024 * 1024)) >"$CONTAINER" ) & spinner $!
-  fi
   chmod 600 "$CONTAINER"
 
-  # ---- LUKS + ext4
-  info "Formatage LUKS… (tapez YES)"
+  info "Formatage LUKS (tapez YES)…"
   printf '%s' "$PASS" \
-    | cryptsetup luksFormat --batch-mode "$CONTAINER" --key-file=- & spinner $!
+    | cryptsetup luksFormat --batch-mode "$CONTAINER" --key-file=-
 
-  info "Ouverture LUKS…"
   printf '%s' "$PASS" \
     | cryptsetup open "$CONTAINER" "$MAPPER" --key-file=-
 
-  info "Formatage ext4…"
-  mkfs.ext4 "/dev/mapper/$MAPPER" & spinner $!
-
+  mkfs.ext4 "/dev/mapper/$MAPPER" -q
   mount "/dev/mapper/$MAPPER" "$MOUNT"
-  chmod -R go-rwx "$MOUNT"
-
+  chmod go-rwx "$MOUNT"
   chattr +i "$CONTAINER" 2>/dev/null || true
-  set_strict_perms
+  set_perms
 
-  success "✅ Coffre installé et monté"
+  success "Coffre installé et monté"
   show_summary
 }
 
 open_env() {
-  log "== OPEN =="
-
-  [[ -f "$CONTAINER" ]] \
-    || { error "❌ Conteneur manquant"; return 1; }
-
-  if ! cryptsetup status "$MAPPER" &>/dev/null; then
-    read -s -p "Passphrase LUKS : " PASS; echo
-    printf '%s' "$PASS" \
-      | cryptsetup open "$CONTAINER" "$MAPPER" --key-file=-
-  else
-    info "⚠️ LUKS déjà ouvert"
-  fi
-
-  mountpoint -q "$MOUNT" \
-    || { mount "/dev/mapper/$MAPPER" "$MOUNT"; chmod -R go-rwx "$MOUNT"; }
-
-  set_strict_perms
-  success "✅ Coffre ouvert"
-  show_summary
+  log "== OPEN =="; [[ -f $CONTAINER ]] || { error "Conteneur absent"; return; }
+  cryptsetup status "$MAPPER" &>/dev/null || {
+    read -rsp "Passphrase : " PASS; echo
+    printf '%s' "$PASS" | cryptsetup open "$CONTAINER" "$MAPPER" --key-file=-
+  }
+  mountpoint -q "$MOUNT" || { mount "/dev/mapper/$MAPPER" "$MOUNT"; chmod go-rwx "$MOUNT"; }
+  set_perms; success "Coffre ouvert"; show_summary
 }
 
 close_env() {
-  log "== CLOSE =="
-
-  mountpoint -q "$MOUNT" \
-    && { umount "$MOUNT"; log "[OK] démonté"; } \
-    || info "⚠️ Pas monté"
-
-  cryptsetup status "$MAPPER" &>/dev/null \
-    && { cryptsetup close "$MAPPER"; log "[OK] LUKS fermé"; } \
-    || info "⚠️ Mapper déjà fermé"
-
-  success "✅ Coffre fermé"
-  show_summary
+  log "== CLOSE =="; mountpoint -q "$MOUNT" && umount "$MOUNT"
+  cryptsetup status "$MAPPER" &>/dev/null && cryptsetup close "$MAPPER"
+  success "Coffre fermé"; show_summary
 }
 
-delete_env() {
-  log "== DELETE =="
-
-  close_env
-  [[ -f "$CONTAINER" ]] && rm -f "$CONTAINER"
-  rmdir "$MOUNT" 2>/dev/null || true
-
-  success "✅ Coffre supprimé"
-  show_summary
-}
+delete_env() { close_env; rm -f "$CONTAINER"; rmdir "$MOUNT" 2>/dev/null || :; success "Coffre supprimé"; }
 
 backup_env() {
-  log "== BACKUP =="
-
-  local ts=$(date +%Y%m%d_%H%M%S)
+  ts=$(date +%Y%m%d_%H%M%S)
   cp "$CONTAINER" "$BACKUP/env_${ts}.img"
-  cryptsetup luksHeaderBackup "$CONTAINER" \
-    --header-backup-file "$BACKUP/env_${ts}.header"
-
-  success "✅ Backup → $BACKUP"
-  show_summary
+  cryptsetup luksHeaderBackup "$CONTAINER" --header-backup-file "$BACKUP/env_${ts}.hdr"
+  success "Backup : $BACKUP/env_${ts}.img"; show_summary
 }
 
 status_env() {
-  log "== STATUS =="
-
   lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT >>"$LOG"
-  df -Th | grep -E "$MAPPER|Filesystem" >>"$LOG"
-  cryptsetup status "$MAPPER" >>"$LOG" 2>/dev/null \
-    || echo "mapper fermé" >>"$LOG"
-
-  success "✅ Statut enregistré"
-  show_summary
+  df -hT | grep -E "$MAPPER|Filesystem" >>"$LOG"
+  cryptsetup status "$MAPPER" >>"$LOG" 2>/dev/null || echo "mapper fermé" >>"$LOG"
+  success "Statut écrit dans $LOG"; show_summary
 }
 
 ##############################################################################
-# PART II : gestion GPG
+# PART II — GPG
 ##############################################################################
 gpg_setup() {
-  log "== GPG SETUP =="
-  ensure_env_open
-
-  read -p "Nom        : " N
-  read -p "Email      : " E
-  read -p "Commentaire: " C
+  ensure_env_open; log "== GPG SETUP =="
+  read -rp "Nom        : " N
+  read -rp "Email      : " E
+  read -rp "Commentaire: " C
 
   cat >gpg-batch <<EOF
 %no-protection
 Key-Type: default
-Subkey-Type: default
 Name-Real: $N
 Name-Comment: $C
 Name-Email: $E
 Expire-Date: 0
 %commit
 EOF
+  gpg --batch --generate-key gpg-batch && rm gpg-batch
 
-  gpg --batch --generate-key gpg-batch
-  rm -f gpg-batch
-
-  key=$(gpg --list-secret-keys --with-colons \
-        | awk -F: '/^sec/ {print $5;exit}')
-
-  gpg --export --armor "$key" >"$GPG_DIR/public_${key}.gpg"
-
-  if whiptail --yesno \
-       "Exporter la clé privée dans le coffre ?" 8 60; then
-    gpg --export-secret-keys --armor "$key" \
-      >"$GPG_DIR/private_${key}.gpg"
-    chmod 600 "$GPG_DIR/private_${key}.gpg"
+  key=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5;exit}')
+  gpg --export  --armor "$key" >"$GPG_DIR/public_${key}.asc"
+  if command -v whiptail &>/dev/null && \
+     whiptail --yesno "Sauvegarder aussi la clé privée ?" 8 60; then
+    gpg --export-secret-keys --armor "$key" >"$GPG_DIR/private_${key}.asc"
+    chmod 600 "$GPG_DIR/private_${key}.asc"
   fi
-
-  success "✅ Clé GPG générée et sauvegardée"
-  show_summary
+  success "Clé GPG $key générée"; show_summary
 }
 
 gpg_import() {
-  log "== GPG IMPORT =="
-  ensure_env_open
-
-  shopt -s nullglob
-  for f in "$GPG_DIR"/*.gpg; do
-    gpg --import "$f" && log "[OK] import $f"
-  done
-  shopt -u nullglob
-
-  success "✅ Import GPG terminé"
-  show_summary
+  ensure_env_open; shopt -s nullglob
+  for f in "$GPG_DIR"/*.asc; do gpg --import "$f"; done
+  shopt -u nullglob; success "Import GPG fini"; show_summary
 }
 
 ##############################################################################
-# PART III : gestion SSH (templates, clés, alias)
+# PART III — SSH
 ##############################################################################
-# ---- helpers internes
-rewrite_identity_paths() {
+rewrite_identity() {
   local tpl="$1"
-  mapfile -t ids < <(awk '/IdentityFile/ {print $2}' "$tpl")
-
-  for idf in "${ids[@]}"; do
-    for f in "$idf" "${idf}.pub"; do
-      [[ -f "$f" ]] && cp "$f" "$SSH_KEYS_DIR/" \
-        && chmod 600 "$SSH_KEYS_DIR/$(basename "$f")"
-    done
+  awk '/IdentityFile/ {print $2}' "$tpl" | while read -r idf; do
+    for f in "$idf" "$idf.pub"; do [[ -f $f ]] && cp "$f" "$SSH_KEYS_DIR/" && chmod 600 "$SSH_KEYS_DIR/$(basename "$f")"; done
     sed -i "s|$idf|$SSH_KEYS_DIR/$(basename "$idf")|g" "$tpl"
   done
-  chmod 600 "$tpl"
 }
 
-ssh_create_template() {              # depuis ~/.ssh/config
-  log "== SSH CREATE TEMPLATE =="
-  ensure_env_open
+ssh_create_template() {
+  ensure_env_open; [[ -f $SSH_CONFIG ]] || { error "Pas de $SSH_CONFIG"; return; }
+  mapfile -t hosts < <(grep -E '^Host[[:space:]]+' "$SSH_CONFIG" | awk '{print $2}')
+  [[ ${#hosts[@]} -eq 0 ]] && { error "Aucun Host"; return; }
 
-  [[ -f "$SSH_CONFIG" ]] \
-    || { whiptail --msgbox "Pas de $SSH_CONFIG" 8 50; return; }
-
-  mapfile -t hosts < <(
-    grep -E '^Host[[:space:]]+' "$SSH_CONFIG" | awk '{print $2}'
-  )
-
-  (( ${#hosts[@]} )) \
-    || { whiptail --msgbox "Aucun Host" 7 40; return; }
-
-  tags=(); for h in "${hosts[@]}"; do tags+=( "$h" "" ); done
-
-  CH=$(whiptail --menu "Choisissez le Host" 20 60 ${#hosts[@]} \
-        "${tags[@]}" 3>&1 1>&2 2>&3) || return
+  local CH
+  if command -v whiptail &>/dev/null; then
+    tags=(); for h in "${hosts[@]}"; do tags+=( "$h" "" ); done
+    CH=$(whiptail --menu "Choisissez un Host" 20 60 ${#hosts[@]} "${tags[@]}" 3>&1 1>&2 2>&3) || return
+  else
+    echo "Hosts :"; printf ' - %s\n' "${hosts[@]}"; read -rp "Choix : " CH
+  fi
 
   tpl="$SSH_TEMPLATES_DIR/${CH}.conf"
-  awk "/^Host[[:space:]]+$CH\\b/,/^[Hh]ost[[:space:]]/" \
-    "$SSH_CONFIG" >"$tpl"
-
-  rewrite_identity_paths "$tpl"
-
-  success "✅ Template ${CH}.conf créé"
-  show_summary
+  awk "/^Host[[:space:]]+$CH\\b/,/^[Hh]ost[[:space:]]/" "$SSH_CONFIG" >"$tpl"
+  rewrite_identity "$tpl"
+  success "Template $CH créé : $tpl"; show_summary
 }
 
-ssh_import_hosts() {                 # import multiple
-  log "== SSH IMPORT HOSTS =="
-  ensure_env_open
+ssh_import_hosts() {
+  ensure_env_open; [[ -f $SSH_CONFIG ]] || { error "Pas de $SSH_CONFIG"; return; }
+  mapfile -t hosts < <(grep -E '^Host[[:space:]]+' "$SSH_CONFIG" | awk '{print $2}')
+  [[ ${#hosts[@]} -eq 0 ]] && { error "Aucun Host"; return; }
 
-  [[ -f "$SSH_CONFIG" ]] \
-    || { whiptail --msgbox "Pas de $SSH_CONFIG" 8 50; return; }
+  local list=("$@"); [[ ${#list[@]} -eq 0 ]] && list=("${hosts[@]}")
 
-  mapfile -t hosts < <(
-    grep -E '^Host[[:space:]]+' "$SSH_CONFIG" | awk '{print $2}'
-  )
-
-  (( ${#hosts[@]} )) \
-    || { whiptail --msgbox "Aucun Host." 7 40; return; }
-
-  tags=(); for h in "${hosts[@]}"; do tags+=( "$h" "" OFF ); done
-
-  CHS=$(whiptail --checklist "Sélectionnez les hosts" 20 70 \
-        ${#hosts[@]} "${tags[@]}" 3>&1 1>&2 2>&3) || return
-
-  for CH in $CHS; do
-    CH="${CH//\"}"
+  for CH in "${list[@]}"; do
     tpl="$SSH_TEMPLATES_DIR/${CH}.conf"
-
-    awk "/^Host[[:space:]]+$CH\\b/,/^[Hh]ost[[:space:]]/" \
-      "$SSH_CONFIG" >"$tpl"
-
-    rewrite_identity_paths "$tpl"
-    log "[OK] import $CH"
+    awk "/^Host[[:space:]]+$CH\\b/,/^[Hh]ost[[:space:]]/" "$SSH_CONFIG" >"$tpl"
+    rewrite_identity "$tpl"; log "Import $CH ok"
   done
-
-  success "✅ Import terminé"
-  show_summary
+  success "Import SSH terminé"; show_summary
 }
 
-ssh_add_host() {                     # création complète
-  log "== SSH ADD HOST =="
-  ensure_env_open
-
+ssh_add_host() {
+  ensure_env_open; local HOST_ALIAS HOST_NAME HOST_USER HOST_PORT KEYTYPE BITS
   if (( $# >= 4 )); then
-    HOST_ALIAS="$1"; HOST_NAME="$2"; HOST_USER="$3"; HOST_PORT="$4"
-    KEYTYPE="${5:-$DEFAULT_KEY_TYPE}"
-    BITS="${6:-}"
+    HOST_ALIAS=$1 HOST_NAME=$2 HOST_USER=$3 HOST_PORT=$4
+    KEYTYPE=${5:-$DEFAULT_KEY_TYPE}; BITS=${6:-}
   else
-    read -p "Alias (Host)        : " HOST_ALIAS
-    [[ -z "$HOST_ALIAS" ]] && { error "Alias vide"; return; }
-
-    read -p "HostName (IP/FQDN)  : " HOST_NAME
-    read -p "User [ubuntu]       : " HOST_USER; HOST_USER=${HOST_USER:-ubuntu}
-    read -p "Port [22]           : " HOST_PORT; HOST_PORT=${HOST_PORT:-22}
-    read -p "Type clé [${DEFAULT_KEY_TYPE}] : " KEYTYPE
-    KEYTYPE=${KEYTYPE:-$DEFAULT_KEY_TYPE}
-
-    BITS=""
-    if [[ "$KEYTYPE" == rsa ]]; then
-      read -p "Bits [4096]        : " BITS
-      BITS=${BITS:-4096}
-    fi
+    read -rp "Alias : " HOST_ALIAS; [[ -z $HOST_ALIAS ]] && { error "Alias vide"; return; }
+    read -rp "HostName (IP/FQDN) : " HOST_NAME
+    read -rp "User [ubuntu]      : " HOST_USER; HOST_USER=${HOST_USER:-ubuntu}
+    read -rp "Port [22]          : " HOST_PORT; HOST_PORT=${HOST_PORT:-22}
+    read -rp "Type clé [$DEFAULT_KEY_TYPE] : " KEYTYPE; KEYTYPE=${KEYTYPE:-$DEFAULT_KEY_TYPE}
+    [[ $KEYTYPE == rsa ]] && read -rp "Bits [4096] : " BITS
   fi
 
   KEY_PATH="$SSH_KEYS_DIR/$HOST_ALIAS"
+  [[ -e $KEY_PATH ]] && { error "Clé déjà existante"; return; }
 
-  [[ -e "$KEY_PATH" ]] \
-    && { error "Clé déjà existante"; return; }
-
-  ssh-keygen -t "$KEYTYPE" \
-    ${BITS:+-b $BITS} -f "$KEY_PATH" -N "" -C "$HOST_ALIAS" &>/dev/null
-
+  ssh-keygen -t "$KEYTYPE" ${BITS:+-b "$BITS"} \
+    -f "$KEY_PATH" -N "" -C "$HOST_ALIAS" &>/dev/null
   chmod 600 "$KEY_PATH" "$KEY_PATH.pub"
 
-  tpl="$SSH_TEMPLATES_DIR/${HOST_ALIAS}.conf"
-  cat >"$tpl" <<EOF
+  cat >"$SSH_TEMPLATES_DIR/${HOST_ALIAS}.conf" <<EOF
 Host $HOST_ALIAS
   HostName $HOST_NAME
   User $HOST_USER
@@ -414,190 +284,82 @@ Host $HOST_ALIAS
   IdentityFile $KEY_PATH
   IdentitiesOnly yes
 EOF
+  chmod 600 "$SSH_TEMPLATES_DIR/${HOST_ALIAS}.conf"
 
-  chmod 600 "$tpl"
-
-  # ---- copie clé publique sur le serveur (option)
-  if (( $# < 4 )); then
-    if whiptail --yesno \
-         "Copier la clé publique sur le serveur ?" 8 60; then
-      ssh-copy-id -i "${KEY_PATH}.pub" \
-        -p "$HOST_PORT" "${HOST_USER}@${HOST_NAME}" \
-        && log "[OK] ssh-copy-id"
-    fi
-  fi
-
-  success "✅ Host « $HOST_ALIAS » prêt"
-  show_summary
+  success "Host $HOST_ALIAS créé"; show_summary
 }
 
-ssh_choose_template() {              # active un template
-  log "== SSH CHOOSE TEMPLATE =="
-  ensure_env_open
+ssh_choose_template() {
+  ensure_env_open; mapfile -t tpls < <(basename -a "$SSH_TEMPLATES_DIR"/*.conf 2>/dev/null)
+  [[ ${#tpls[@]} -eq 0 ]] && { error "Pas de template"; return; }
 
-  mapfile -t tpls < <(
-    find "$SSH_TEMPLATES_DIR" -name '*.conf' -printf '%f\n'
-  )
+  local CH="$1"
+  [[ -z $CH ]] && {
+    command -v whiptail &>/dev/null && {
+      tags=(); for t in "${tpls[@]}"; do tags+=( "$t" "" ); done
+      CH=$(whiptail --menu "Template actif" 15 60 ${#tpls[@]} "${tags[@]}" 3>&1 1>&2 2>&3) || return
+    } || { printf 'Templates :\n'; printf ' - %s\n' "${tpls[@]}"; read -rp "Choix : " CH; }
+  }
 
-  (( ${#tpls[@]} )) \
-    || { whiptail --msgbox "Créez d’abord un template" 7 40; return; }
-
-  if (( $# == 1 )); then
-    CH="$1"
-  else
-    tags=(); for t in "${tpls[@]}"; do tags+=( "$t" "" ); done
-    CH=$(whiptail --menu "Template actif ?" 15 60 ${#tpls[@]} \
-          "${tags[@]}" 3>&1 1>&2 2>&3) || return
-  fi
-
-  SSH_CONFIG_PATH_ACTIVE="$SSH_TEMPLATES_DIR/$CH"
-
-  printf 'alias evsh="ssh -F %s %%@"\n' \
-    "$SSH_CONFIG_PATH_ACTIVE" >"$ALIAS_FILE_IN_VAULT"
-
-  chmod 600 "$ALIAS_FILE_IN_VAULT"
-  ln -sf "$ALIAS_FILE_IN_VAULT" "$ALIAS_LINK"
-
+  printf 'alias evsh="ssh -F %s %%@"\n' "$SSH_TEMPLATES_DIR/$CH" >"$ALIAS_FILE_IN_VAULT"
+  chmod 600 "$ALIAS_FILE_IN_VAULT"; ln -sf "$ALIAS_FILE_IN_VAULT" "$ALIAS_LINK"
   for rc in "$USER_HOME/.bashrc" "$USER_HOME/.zshrc"; do
-    [[ -f "$rc" ]] && grep -qF ".aliases_env" "$rc" \
-      || echo "source ~/.aliases_env" >>"$rc"
+    [[ -f $rc && ! $(grep -F ".aliases_env" "$rc") ]] && echo "source ~/.aliases_env" >>"$rc"
   done
-
-  success "✅ Template actif : $CH"
-  show_summary
+  success "Template $CH activé"; show_summary
 }
 
-##############################################################################
-# Outils SSH supplémentaires
-##############################################################################
-ssh_delete() {
-  log "== SSH DELETE =="
-  ensure_env_open
+ssh_delete() { ensure_env_open; rm -rf "$SSH_DIR"/*; success "Vault SSH vidé"; }
 
-  rm -rf "$SSH_DIR"/*
-  mkdir -p "$SSH_TEMPLATES_DIR" "$SSH_KEYS_DIR"
-
-  success "✅ Vault SSH vidé"
-  show_summary
-}
-
-ssh_backup() {
-  log "== SSH BACKUP =="
-  ensure_env_open
-
-  ts=$(date +%Y%m%d_%H%M%S)
-  tar czf "$SSH_BACKUP_DIR/ssh_wallet_$ts.tar.gz" -C "$SSH_DIR" .
-
-  whiptail --msgbox \
-    "Backup : $SSH_BACKUP_DIR/ssh_wallet_$ts.tar.gz" 8 70
-
-  success "✅ Backup SSH créé"
-  show_summary
-}
+ssh_backup() { ensure_env_open; ts=$(date +%Y%m%d_%H%M%S)
+  tar czf "$SSH_BACKUP_DIR/ssh_$ts.tar.gz" -C "$SSH_DIR" .; success "Backup SSH : $SSH_BACKUP_DIR/ssh_$ts.tar.gz"; }
 
 restore_ssh_wallet() {
-  log "== SSH RESTORE =="
-  ensure_env_open
-
-  mapfile -t bs < <(
-    ls "$SSH_BACKUP_DIR"/ssh_wallet_*.tar.gz 2>/dev/null || true
-  )
-
-  (( ${#bs[@]} )) \
-    || { whiptail --msgbox "Pas de backup" 7 40; return; }
-
-  tags=(); for b in "${bs[@]}"; do
-    tags+=( "$(basename "$b")" "" )
-  done
-
-  CH=$(whiptail --menu "Choisissez backup" 15 60 ${#bs[@]} \
-        "${tags[@]}" 3>&1 1>&2 2>&3) || return
-
-  rm -rf "$SSH_DIR"/*
-  tar xzf "$SSH_BACKUP_DIR/$CH" -C "$SSH_DIR"
-
-  success "✅ Backup restauré"
-  show_summary
+  ensure_env_open; mapfile -t bs < <(ls "$SSH_BACKUP_DIR"/ssh_*.tar.gz 2>/dev/null || :)
+  [[ ${#bs[@]} -eq 0 ]] && { error "Pas de backup"; return; }
+  local CH; CH=${1:-${bs[-1]}}; rm -rf "$SSH_DIR"/*; tar xzf "$CH" -C "$SSH_DIR"
+  success "Backup restauré : $CH"
 }
 
 auto_open_toggle() {
-  log "== AUTO-OPEN =="
-
-  line="$PWD/secure_env.sh open_env &>/dev/null"
-
+  local line="$PWD/secure_env.sh open_env &>/dev/null"
   if grep -qF "$line" "$USER_HOME/.bashrc"; then
-    sed -i "\|$line|d" "$USER_HOME/.bashrc"
-    success "✅ Auto-open désactivé"
+    sed -i "\|$line|d" "$USER_HOME/.bashrc"; success "Auto-open désactivé"
   else
-    echo "$line" >>"$USER_HOME/.bashrc"
-    success "✅ Auto-open activé"
+    echo "$line" >>"$USER_HOME/.bashrc"; success "Auto-open activé"
   fi
-
-  show_summary
 }
 
 ##############################################################################
-# Menu interactif & CLI directe
+# Menu interactif (si whiptail dispo) ou appel direct
 ##############################################################################
 cleanup_stale
 
-if [[ "${1:-}" == "--menu" ]]; then
+if [[ ${1:-} == --menu && -x $(command -v whiptail) ]]; then
   INTERACTIVE=1
-
   while true; do
-    TOP=$(whiptail --title "Coffre sécurisé" --menu "Section" 15 60 4 \
-          Environnement "LUKS/ext4" \
-          Cryptographie "GPG"       \
-          SSH           "SSH"       \
-          Quitter       "Quitter"   3>&1 1>&2 2>&3) || exit 0
-
-    case $TOP in
-      Environnement)
-        ACTION=$(whiptail --menu "Choisissez" 20 60 7 \
-                 install_env "Installer"  \
-                 open_env    "Ouvrir"     \
-                 close_env   "Fermer"     \
-                 delete_env  "Supprimer"  \
-                 backup_env  "Backup"     \
-                 status_env  "Statut"     \
-                 Retour      "Retour"     3>&1 1>&2 2>&3)
-        [[ $ACTION != Retour ]] && "$ACTION"
-        ;;
-
-      Cryptographie)
-        ACTION=$(whiptail --menu "Choisissez" 15 60 3 \
-                 gpg_setup  "Créer une clé" \
-                 gpg_import "Importer GPG"  \
-                 Retour     "Retour"        3>&1 1>&2 2>&3)
-        [[ $ACTION != Retour ]] && "$ACTION"
-        ;;
-
-      SSH)
-        ACTION=$(whiptail --menu "Choisissez" 23 60 11 \
-                 ssh_add_host        "Créer un Host neuf" \
-                 ssh_create_template "Template depuis ~/.ssh/config" \
-                 ssh_import_hosts    "Importer plusieurs Hosts"      \
-                 ssh_choose_template "Activer un template & alias"   \
-                 ssh_delete          "Vider le coffre SSH"           \
-                 ssh_backup          "Sauvegarder le coffre SSH"     \
-                 restore_ssh_wallet  "Restaurer un backup"           \
-                 auto_open_toggle    "Auto-open au login"            \
-                 Retour              "Retour"                        3>&1 1>&2 2>&3)
-        [[ $ACTION != Retour ]] && "$ACTION"
-        ;;
-
-      Quitter) exit 0 ;;
-    esac
+    ITEM=$(whiptail --title "Coffre sécurisé" --menu "Choisissez…" 18 60 10 \
+      install_env "Installer coffre" \
+      open_env    "Ouvrir" \
+      close_env   "Fermer" \
+      delete_env  "Supprimer coffre" \
+      backup_env  "Backup LUKS" \
+      status_env  "Statut" \
+      gpg_setup   "Créer clé GPG" \
+      gpg_import  "Importer clés GPG" \
+      ssh_add_host        "Nouveau Host SSH" \
+      ssh_create_template "Template depuis ~/.ssh/config" \
+      ssh_import_hosts    "Importer hosts (~/.ssh/config)" \
+      ssh_choose_template "Activer template & alias" \
+      ssh_backup          "Backup vault SSH" \
+      restore_ssh_wallet  "Restaurer backup SSH" \
+      auto_open_toggle    "Auto-open au login" \
+      Quitter "Quitter" 3>&1 1>&2 2>&3) || exit 0
+    [[ $ITEM == Quitter ]] && exit 0
+    $ITEM
   done
-
 else
-  FUNC="${1//-/_}"
-  shift || true
-
-  if [[ -n "$FUNC" && $(type -t "$FUNC") == "function" ]]; then
-    "$FUNC" "$@"
-  else
-    echo "Usage : $0 --menu  OU  $0 <fonction> [options]" >&2
-    exit 1
-  fi
+  cmd="${1:-}"; shift || true
+  [[ -z $cmd ]] && { echo "Usage : sudo $0 --menu  ou  sudo $0 <commande>"; exit 1; }
+  ${cmd//-/_} "$@"
 fi
