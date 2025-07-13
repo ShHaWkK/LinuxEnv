@@ -6,7 +6,7 @@ export PATH="$PATH:/sbin:/usr/sbin"
 
 # ─── Couleurs et logs ─────────────────────────────────────────────────────────
 RED='\e[31m'; GREEN='\e[32m'; BLUE='\e[34m'; NC='\e[0m'
-LOG="/tmp/env2.log"; : >"$LOG"
+LOG="/tmp/env2.log"
 exec 3>&1
 log(){ echo "[$(date +%T)] $*" >>"$LOG"; }
 info(){ echo -e "${BLUE}$*${NC}" >&3; }
@@ -15,6 +15,7 @@ error(){ echo -e "${RED}$*${NC}" >&2; }
 
 # ─── Pré-vérifications ───────────────────────────────────────────────────────
 (( EUID==0 )) || { error "Relancez en root"; exit 1; }
+: >"$LOG"
 for cmd in cryptsetup mkfs.ext4 mount umount fallocate lsblk df blkid pv whiptail gpg ssh-keygen tar; do
   command -v "$cmd" &>/dev/null || { error "$cmd manquant"; exit 1; }
 done
@@ -371,7 +372,7 @@ ssh_start(){
     --menu "Choisissez configuration" 15 60 ${#cfgs[@]} \
     "${tags[@]}" \
     3>&1 1>&2 2>&3) || return
-  ssh -F "$SSH_DIR/$CH"
+  ssh -F "$SSH_DIR/$CH" "$CH"
   log "[OK] Session SSH ($CH) terminée"
   local msg="✅ Session terminée"
   success "$msg"
