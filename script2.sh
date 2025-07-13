@@ -94,7 +94,7 @@ ask_pass(){
   read -s -p "Confirmer       : " PASS2; echo
   [[ "$PASS" == "$PASS2" ]] || { error "[X] Passphrases différentes"; exit 1; }
 }
-
+########################### INSTALLATION DE L ENVIRONNEMENT ###########################
 install_env(){
   cleanup_stale; log "== INSTALL ENV =="
   ask_pass
@@ -189,7 +189,7 @@ close_env(){
   success "$msg"; show_summary "$msg"
 }
 
-#  DELETE_ENV CORRIGÉ 
+############################  DELETE_ENV  ###########################
 delete_env(){
   log "== DELETE ENV =="
   close_env
@@ -202,7 +202,7 @@ delete_env(){
   local msg="✅ Environment supprimé"
   success "$msg"; show_summary "$msg"
 }
-
+############################  BACKUP ############################
 backup_env(){
   log "== BACKUP ENV =="
   local ts=$(date +%Y%m%d_%H%M%S)
@@ -213,7 +213,7 @@ backup_env(){
   local msg="✅ Backup créé dans $BACKUP"
   success "$msg"; show_summary "$msg"
 }
-
+############################ STATUS ############################
 status_env(){
   log "== STATUS ENV =="
   lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT >>"$LOG"
@@ -253,7 +253,7 @@ EOF
   local msg="✅ GPG setup terminé (public+priv dans $GPG_DIR)"
   success "$msg"; show_summary "$msg"
 }
-
+############################ GPG IMPORT ############################
 gpg_import(){
   log "== GPG IMPORT =="
   ensure_env_open || return
@@ -265,7 +265,7 @@ gpg_import(){
   local msg="✅ Import GPG terminé"
   success "$msg"; show_summary "$msg"
 }
-
+############################ GPG EXPORT ############################
 gpg_export(){
   log "== GPG EXPORT =="
   ensure_env_open || return
@@ -325,7 +325,7 @@ EOF
   log "[OK] Template sshconf_$CH créé"
   whiptail --msgbox "✅ Template '$CH' → $SSH_DIR/sshconf_$CH" 8 60
 }
-
+############################ SSH ALIAS ############################
 ssh_setup_alias(){
   log "== SSH SETUP ALIAS =="
   ensure_env_open || return
@@ -336,7 +336,7 @@ ssh_setup_alias(){
   local msg="✅ Alias prêt (source $ALIAS_LINK)"
   success "$msg"; show_summary "$msg"
 }
-
+############################ SSH IMPORT HOST ############################
 ssh_import_host(){
   log "== SSH IMPORT HOST =="
   ensure_env_open || return
@@ -370,7 +370,7 @@ ssh_import_host(){
   local msg="✅ SSH host importé → $SSH_CONFIG_PATH"
   success "$msg"; show_summary "$msg"
 }
-
+############################ SSH DELETE ############################
 ssh_delete(){
   log "== SSH DELETE =="
   ensure_env_open || return
@@ -379,7 +379,7 @@ ssh_delete(){
   local msg="✅ Vault SSH vidé"
   success "$msg"; show_summary "$msg"
 }
-
+############################ SSH BACKUP ############################
 ssh_backup(){
   log "== SSH BACKUP =="
   ensure_env_open || return
@@ -390,7 +390,7 @@ ssh_backup(){
   local msg="✅ SSH backup créé"
   success "$msg"; show_summary "$msg"
 }
-
+############################ RESTORE SSH WALLET ############################
 restore_ssh_wallet(){
   log "== SSH RESTORE =="
   ensure_env_open || return
@@ -403,7 +403,7 @@ restore_ssh_wallet(){
   local msg="✅ SSH wallet restauré"
   success "$msg"; show_summary "$msg"
 }
-
+############################ OPEN TOGGLE ############################
 auto_open_toggle(){
   log "== AUTO-OPEN TOGGLE =="
   if grep -q "secure_env.sh open_env" "$USER_HOME/.bashrc"; then
