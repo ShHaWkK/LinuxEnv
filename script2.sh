@@ -6,7 +6,7 @@ export PATH="$PATH:/sbin:/usr/sbin"
 
 # ─── Couleurs et logs ─────────────────────────────────────────────────────────
 RED='\e[31m'; GREEN='\e[32m'; BLUE='\e[34m'; NC='\e[0m'
-LOG="/tmp/env2.log"; : >"$LOG"
+LOG="/tmp/secure_env.log"; : >"$LOG"
 exec 3>&1
 log(){ echo "[$(date +%T)] $*" >>"$LOG"; }
 info(){ echo -e "${BLUE}$*${NC}" >&3; }
@@ -30,6 +30,9 @@ GPG_DIR="$MOUNT/gpg"
 SSH_BACKUP_DIR="$BACKUP/ssh_wallets"
 ALIAS_LINK="$HOME/.aliases_env"
 
+# 0=non-interactive, 1=menu
+INTERACTIVE=0
+
 if [[ -n "${SUDO_USER-}" && "$SUDO_USER" != "root" ]]; then
   USER_HOME="/home/$SUDO_USER"
 else
@@ -51,7 +54,9 @@ spinner(){
 
 # ─── Affichage résumé ────────────────────────────────────────────────────────
 show_summary(){
-  whiptail --title "Résumé Opération" --textbox "$LOG" 20 70
+  if [[ ${INTERACTIVE:-0} -eq 1 ]]; then
+    whiptail --title "Résumé Opération" --textbox "$LOG" 20 70
+  fi
   echo -e "\n— Derniers logs —" >&3
   tail -n 10 "$LOG" >&3
 }
@@ -369,6 +374,7 @@ auto_open_toggle(){
 # ─── Menu principal ────────────────────────────────────────────────────────
 cleanup_stale
 if [[ "${1:-}" == "--menu" ]]; then
+  INTERACTIVE=1
   while :; do
     SECTION=$(whiptail --title "Secure Env" --menu "Menu" 15 60 4 \
       Environnement "Environnement" \
@@ -422,5 +428,12 @@ if [[ "${1:-}" == "--menu" ]]; then
     esac
   done
 else
-  echo "Usage: $0 --menu"
+  ACTION="${1:-}"
+  if [[ -n "$ACTION" && $(type -t "$ACTION") == "function" ]]; then
+    shift
+    "$ACTION" "$@"
+  else
+    echo "Usage: $0 --menu|<action>" >&2
+    exit 1
+  fi
 fi
