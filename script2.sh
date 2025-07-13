@@ -32,6 +32,7 @@ MOUNT="$USER_HOME/env_mount"
 BACKUP="$USER_HOME/env_backups"
 SSH_DIR="$MOUNT/ssh"
 SSH_CONFIG_PATH="$SSH_DIR/ssh_config"
+SSH_ALIAS_FILE="$SSH_DIR/ssh_aliases"
 GPG_DIR="$MOUNT/gpg"
 SSH_BACKUP_DIR="$BACKUP/ssh_wallets"
 ALIAS_LINK="$USER_HOME/.aliases_env"
@@ -254,6 +255,22 @@ gpg_import(){
   success "$msg"; show_summary "$msg"
 }
 
+gpg_export(){
+  log "== GPG EXPORT =="
+  ensure_env_open || return
+  mkdir -p "$GPG_DIR"
+  mapfile -t keys < <(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5}')
+  (( ${#keys[@]} )) || { whiptail --msgbox "Aucune clé à exporter" 8 50; return; }
+  for k in "${keys[@]}"; do
+    gpg --export --armor "$k" >"$GPG_DIR/public_${k}.gpg"
+    gpg --export-secret-keys --armor "$k" >"$GPG_DIR/private_${k}.gpg"
+    chmod 600 "$GPG_DIR/private_${k}.gpg"
+    log "[OK] export $k"
+  done
+  local msg="✅ Export GPG terminé"
+  success "$msg"; show_summary "$msg"
+}
+
 # SSH avancé
 ssh_create_template(){
   log "== SSH CREATE TEMPLATE =="
@@ -301,9 +318,10 @@ EOF
 ssh_setup_alias(){
   log "== SSH SETUP ALIAS =="
   ensure_env_open || return
-  HOST_ALIAS=$(awk '/^Host /{print $2;exit}' "$SSH_CONFIG_PATH" 2>/dev/null)
-  echo "alias evsh='ssh -F $SSH_CONFIG_PATH ${HOST_ALIAS}'" >"$ALIAS_LINK"
-  log "[OK] alias evsh dans $ALIAS_LINK"
+  echo "alias evsh='ssh -F $SSH_CONFIG_PATH'" >"$SSH_ALIAS_FILE"
+  chmod 644 "$SSH_ALIAS_FILE"
+  ln -sf "$SSH_ALIAS_FILE" "$ALIAS_LINK"
+  log "[OK] alias evsh dans $SSH_ALIAS_FILE (lien $ALIAS_LINK)"
   local msg="✅ Alias prêt (source $ALIAS_LINK)"
   success "$msg"; show_summary "$msg"
 }
@@ -316,12 +334,27 @@ ssh_import_host(){
   (( ${#hosts[@]} )) || { whiptail --msgbox "Aucun host" 6 50; return; }
   tags=(); for h in "${hosts[@]}"; do tags+=( "$h" "" ); done
   CH=$(whiptail --menu "Choisissez host" 15 60 ${#hosts[@]} "${tags[@]}" 3>&1 1>&2 2>&3) || return
-  awk "/^Host $CH$/,/^Host /" "$SSH_CONFIG" >"$SSH_CONFIG_PATH"
-  idf=$(awk "/^Host $CH$/,/^Host /" "$SSH_CONFIG" | awk '/IdentityFile/ {print $2;exit}')
-  if [[ -n "$idf" ]]; then
-    cp "$idf" "$SSH_DIR/"; chmod 600 "$SSH_DIR/$(basename "$idf")"
-    sed -i "s|$idf|$SSH_DIR/$(basename "$idf")|" "$SSH_CONFIG_PATH"
+  block=$(awk "/^Host $CH$/,/^Host /" "$SSH_CONFIG")
+  [[ -n "$block" ]] || { whiptail --msgbox "Bloc introuvable" 6 50; return; }
+
+  if grep -q "^Host $CH$" "$SSH_CONFIG_PATH" 2>/dev/null; then
+    whiptail --yesno "Host $CH existe déjà. Remplacer ?" 8 60 || return
+    awk -v h="$CH" 'BEGIN{p=1} /^Host /{if($2==h){p=0;next}; if(!p){p=1;next}} {print}' "$SSH_CONFIG_PATH" >"$SSH_CONFIG_PATH.tmp"
+    mv "$SSH_CONFIG_PATH.tmp" "$SSH_CONFIG_PATH"
   fi
+
+  printf '%s\n' "$block" >>"$SSH_CONFIG_PATH"
+
+  while read -r line; do
+    if [[ $line =~ [Ii]dentity[Ff]ile[[:space:]]+(.+) ]]; then
+      idf=${BASH_REMATCH[1]}
+      base=$(basename "$idf")
+      cp "$idf" "$SSH_DIR/$base" && chmod 600 "$SSH_DIR/$base"
+      [[ -f "${idf}.pub" ]] && cp "${idf}.pub" "$SSH_DIR/${base}.pub"
+      sed -i "s|$idf|$SSH_DIR/$base|g" "$SSH_CONFIG_PATH"
+    fi
+  done <<<"$block"
+
   log "[OK] Host $CH importé"
   local msg="✅ SSH host importé → $SSH_CONFIG_PATH"
   success "$msg"; show_summary "$msg"
@@ -394,9 +427,10 @@ if [[ "${1:-}" == "--menu" ]]; then
           status_env  "Statut"    3>&1 1>&2 2>&3)
         [[ -n "$ACTION" ]] && $ACTION ;;
       Cryptographie)
-        ACTION=$(whiptail --title "GPG" --menu "Choisissez" 15 60 2 \
+        ACTION=$(whiptail --title "GPG" --menu "Choisissez" 15 60 3 \
           gpg_setup  "Setup" \
-          gpg_import "Import" 3>&1 1>&2 2>&3)
+          gpg_import "Import" \
+          gpg_export "Export" 3>&1 1>&2 2>&3)
         [[ -n "$ACTION" ]] && $ACTION ;;
       SSH)
         ACTION=$(whiptail --title "SSH" --menu "Choisissez" 20 60 6 \
