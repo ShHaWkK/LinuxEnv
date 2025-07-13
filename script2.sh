@@ -18,10 +18,10 @@ success(){ echo -e "${GREEN}$*${NC}" >&3; }
 error()  { echo -e "${RED}$*${NC}" >&2; }
 
 #  Pré-vérifications 
-(( EUID==0 )) || { error "❌ Relancez en root !"; exit 1; }
+(( EUID==0 )) || { error "[X] Relancez en root !"; exit 1; }
 for cmd in cryptsetup mkfs.ext4 mount umount fallocate dd losetup lsblk df blkid pv \
            whiptail gpg ssh-keygen tar; do
-  command -v "$cmd" &>/dev/null || { error "⛔ $cmd manquant"; exit 1; }
+  command -v "$cmd" &>/dev/null || { error "[X] $cmd manquant"; exit 1; }
 done
 
 # Variables globales 
@@ -81,7 +81,7 @@ ask_pass(){
   SIZE=${SIZE:-$DEFAULT_SIZE}
   read -s -p "Passphrase LUKS : " PASS; echo
   read -s -p "Confirmer       : " PASS2; echo
-  [[ "$PASS" == "$PASS2" ]] || { error "❌ Passphrases différentes"; exit 1; }
+  [[ "$PASS" == "$PASS2" ]] || { error "[X] Passphrases différentes"; exit 1; }
 }
 
 install_env(){
@@ -137,7 +137,7 @@ open_env(){
     info  "⚠️ LUKS déjà ouvert"
     log   "[!!] LUKS déjà ouvert"
   else
-    [[ -f "$CONTAINER" ]] || { log "[ER] conteneur manquant"; show_summary "❌ Conteneur manquant"; return; }
+    [[ -f "$CONTAINER" ]] || { log "[ER] conteneur manquant"; show_summary "[X] Conteneur manquant"; return; }
     read -s -p "Passphrase LUKS : " PASS; echo
     info "Ouverture LUKS…"
     printf '%s' "$PASS" \
