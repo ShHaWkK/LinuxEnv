@@ -6,7 +6,7 @@ export PATH="$PATH:/sbin:/usr/sbin"
 
 # ─── Couleurs et logs ─────────────────────────────────────────────────────────
 RED='\e[31m'; GREEN='\e[32m'; BLUE='\e[34m'; NC='\e[0m'
-LOG="/tmp/secure_env.log"; : >"$LOG"
+LOG="/tmp/env2.log"; : >"$LOG"
 exec 3>&1
 log(){ echo "[$(date +%T)] $*" >>"$LOG"; }
 info(){ echo -e "${BLUE}$*${NC}" >&3; }
@@ -63,14 +63,6 @@ cleanup_stale(){
   if cryptsetup status "$MAPPER" &>/dev/null; then
     cryptsetup close "$MAPPER" && log "[OK] mapper fermé"
   fi
-}
-
-check_mounted(){
-  mountpoint -q "$MOUNT" || {
-    whiptail --msgbox "Environnement non monté" 8 40
-    log "[ER] environnement non monté"
-    return 1
-  }
 }
 
 ensure_env_open(){
@@ -140,7 +132,6 @@ install_env(){
 }
 
 open_env(){
-  cleanup_stale
   log "== OPEN ENV =="
   [[ ! -f "$CONTAINER" ]] && { log "[ER] Conteneur manquant"; show_summary; return; }
   if ! cryptsetup status "$MAPPER" &>/dev/null; then
@@ -243,7 +234,7 @@ gpg_import(){
 # ─── Partie III : SSH avancé ────────────────────────────────────────────────
 ssh_create_template(){
   log "== SSH CREATE TEMPLATE =="
-  check_mounted || return
+  ensure_env_open || return
   [[ ! -f "$SSH_CONFIG" ]] && {
     whiptail --msgbox "Aucun ~/.ssh/config" 6 50
     log "[ER] Pas de ~/.ssh/config"
@@ -274,7 +265,7 @@ ssh_create_template(){
 
 ssh_setup_alias(){
   log "== SSH SETUP ALIAS =="
-  check_mounted || return
+  ensure_env_open || return
   echo "alias evsh='ssh -F $SSH_DIR/sshconf_*'" >"$ALIAS_LINK"
   log "[OK] Alias evsh créé"
   success "✅ Alias créé"
@@ -283,7 +274,7 @@ ssh_setup_alias(){
 
 ssh_import_host(){
   log "== SSH IMPORT HOST =="
-  check_mounted || return
+  ensure_env_open || return
   [[ ! -f "$SSH_CONFIG" ]] && { whiptail --msgbox "Pas de ~/.ssh/config" 6 50; log "[ER] pas de config"; return; }
   mapfile -t hosts < <(grep '^Host ' "$SSH_CONFIG" | awk '{print $2}')
   [[ ${#hosts[@]} -eq 0 ]] && { whiptail --msgbox "Aucun host" 6 50; log "[ER] aucun host"; return; }
@@ -303,7 +294,7 @@ ssh_import_host(){
 
 ssh_start(){
   log "== SSH START =="
-  check_mounted || return
+  ensure_env_open || return
   mapfile -t cfgs < <(ls "$SSH_DIR"/sshconf_* 2>/dev/null)
   [[ ${#cfgs[@]} -eq 0 ]] && {
     whiptail --msgbox "Aucune config SSH trouvée" 6 50
@@ -322,7 +313,7 @@ ssh_start(){
 
 ssh_delete(){
   log "== SSH DELETE =="
-  check_mounted || return
+  ensure_env_open || return
   rm -rf "$SSH_DIR"/*
   whiptail --msgbox "Vault SSH vidé." 6 50
   log "[OK] Vault SSH vidé"
@@ -332,7 +323,7 @@ ssh_delete(){
 
 ssh_backup(){
   log "== SSH BACKUP =="
-  check_mounted || return
+  ensure_env_open || return
   ts=$(date +%Y%m%d_%H%M%S)
   tar czf "$SSH_BACKUP_DIR/ssh_wallet_$ts.tar.gz" -C "$SSH_DIR" .
   whiptail --msgbox "Backup SSH → ssh_wallet_$ts.tar.gz" 6 60
@@ -343,7 +334,7 @@ ssh_backup(){
 
 restore_ssh_wallet(){
   log "== SSH RESTORE =="
-  check_mounted || return
+  ensure_env_open || return
   mapfile -t bs < <(ls "$SSH_BACKUP_DIR"/ssh_wallet_*.tar.gz 2>/dev/null)
   [[ ${#bs[@]} -eq 0 ]] && {
     whiptail --msgbox "Aucune sauvegarde SSH" 6 50
