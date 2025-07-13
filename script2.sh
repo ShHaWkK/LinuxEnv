@@ -332,7 +332,8 @@ ssh_start(){
   (( ${#cfgs[@]} )) || { whiptail --msgbox "Aucune config SSH" 6 50; return; }
   tags=(); for f in "${cfgs[@]}"; do tags+=( "$(basename "$f")" "" ); done
   CH=$(whiptail --menu "Choisissez config" 15 60 ${#cfgs[@]} "${tags[@]}" 3>&1 1>&2 2>&3) || return
-  ssh -F "$SSH_DIR/$CH"
+  HOST_ALIAS=$(awk '/^Host /{print $2;exit}' "$SSH_DIR/$CH")
+  ssh -F "$SSH_DIR/$CH" "$HOST_ALIAS"
   log "[OK] Session SSH $CH terminée"
   local msg="✅ SSH session $CH terminée"
   success "$msg"; show_summary "$msg"
@@ -424,9 +425,10 @@ if [[ "${1:-}" == "--menu" ]]; then
     esac
   done
 else
-  ACTION="${1:-}"
+  ACTION="${1//-/_}"
   if [[ -n "$ACTION" && $(type -t "$ACTION") == "function" ]]; then
-    shift; "$ACTION" "$@"
+        shift
+    "$ACTION" "$@"
   else
     echo "Usage: $0 --menu | <action>" >&2
     exit 1
